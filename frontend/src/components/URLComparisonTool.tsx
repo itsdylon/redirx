@@ -3,10 +3,19 @@
 import React, { useState } from 'react';
 import { AlertCircle } from 'lucide-react';
 
+interface ComparisonResult {
+  url: string | null;
+  similarity: number;
+}
+
+interface Results {
+  [key: string]: ComparisonResult;
+}
+
 const URLComparisonTool = () => {
   const [oldSite, setOldSite] = useState('');
   const [newSite, setNewSite] = useState('');
-  const [results, setResults] = useState<any>(null);
+  const [results, setResults] = useState<Results | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -17,8 +26,7 @@ const URLComparisonTool = () => {
     setResults(null);
 
     try {
-      // Replace YOUR_NGROK_URL with the URL ngrok gives you
-      const response = await fetch('https://f8e3-2600-1700-1060-5280-b1b7-3604-dce4-694e.ngrok-free.app/compare-sites', {
+      const response = await fetch('/compare-sites', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -42,12 +50,12 @@ const URLComparisonTool = () => {
     }
   };
 
-  const generateRedirectRule = (oldUrl: string, newUrl: string) => {
+  const generateRedirectRule = (oldUrl: string, newUrl: string): string => {
     try {
       const oldPath = new URL(oldUrl).pathname;
       const newPath = new URL(newUrl).pathname;
       return `RewriteRule ^${oldPath.substring(1)}$ ${newPath} [R=301,L]`;
-    } catch (err) {
+    } catch {
       return 'Invalid URL';
     }
   };
@@ -120,7 +128,7 @@ const URLComparisonTool = () => {
                 </tr>
               </thead>
               <tbody>
-                {Object.entries(results).map(([oldUrl, match]: [string, any]) => (
+                {Object.entries(results).map(([oldUrl, match]: [string, ComparisonResult]) => (
                   <tr key={oldUrl}>
                     <td className="border p-2 break-all">{oldUrl}</td>
                     <td className="border p-2 break-all">{match.url}</td>
