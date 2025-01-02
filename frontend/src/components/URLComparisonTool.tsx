@@ -17,7 +17,8 @@ const URLComparisonTool = () => {
     setResults(null);
 
     try {
-      const response = await fetch('http://127.0.0.1:5000/compare-sites', {
+      // Replace YOUR_NGROK_URL with the URL ngrok gives you
+      const response = await fetch('https://YOUR_NGROK_URL/compare-sites', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -53,7 +54,7 @@ const URLComparisonTool = () => {
 
   return (
     <div className="max-w-4xl mx-auto p-6 space-y-6">
-      <h1 className="text-2xl font-bold mb-6">RedirX</h1>
+      <h1 className="text-2xl font-bold mb-6">Website Migration Comparison Tool</h1>
       
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="space-y-2">
