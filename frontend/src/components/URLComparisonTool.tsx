@@ -18,7 +18,7 @@ const URLComparisonTool = () => {
 
     try {
       // Replace YOUR_NGROK_URL with the URL ngrok gives you
-      const response = await fetch('https://YOUR_NGROK_URL/compare-sites', {
+      const response = await fetch('https://f8e3-2600-1700-1060-5280-b1b7-3604-dce4-694e.ngrok-free.app/compare-sites', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
