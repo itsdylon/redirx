@@ -62,7 +62,7 @@ const URLComparisonTool = () => {
 
   return (
     <div className="max-w-4xl mx-auto p-6 space-y-6">
-      <h1 className="text-2xl font-bold mb-6">Website Migration Comparison Tool</h1>
+      <h1 className="text-2xl font-bold mb-6">RedirX</h1>
       
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="space-y-2">
