@@ -3,10 +3,19 @@
 import React, { useState } from 'react';
 import { AlertCircle } from 'lucide-react';
 
+interface ComparisonResult {
+  url: string | null;
+  similarity: number;
+}
+
+interface Results {
+  [key: string]: ComparisonResult;
+}
+
 const URLComparisonTool = () => {
   const [oldSite, setOldSite] = useState('');
   const [newSite, setNewSite] = useState('');
-  const [results, setResults] = useState<any>(null);
+  const [results, setResults] = useState<Results | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -41,12 +50,12 @@ const URLComparisonTool = () => {
     }
   };
 
-  const generateRedirectRule = (oldUrl: string, newUrl: string) => {
+  const generateRedirectRule = (oldUrl: string, newUrl: string): string => {
     try {
       const oldPath = new URL(oldUrl).pathname;
-      const newPath = new URL(newUrl).pathname;
-      return `RewriteRule ^${oldPath.substring(1)}$ ${newPath} [R=301,L]`;
-    } catch (err) {
+      const newPath = new URL(newUrl);
+      return `Redirect 301 ^/${oldPath.substring(1)}/$ ${newPath}/`;
+    } catch {
       return 'Invalid URL';
     }
   };
@@ -57,7 +66,7 @@ const URLComparisonTool = () => {
       
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="space-y-2">
-          <label htmlFor="oldSite" className="block font-medium">
+          <label htmlFor="oldSite" className="block font-medium text-gray-900 dark:text-gray-100">
             Original Site URL:
           </label>
           <input
@@ -66,13 +75,13 @@ const URLComparisonTool = () => {
             value={oldSite}
             onChange={(e) => setOldSite(e.target.value)}
             required
-            className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500"
+            className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 dark:text-gray-100"
             placeholder="https://old-site.com"
           />
         </div>
 
         <div className="space-y-2">
-          <label htmlFor="newSite" className="block font-medium">
+          <label htmlFor="newSite" className="block font-medium text-gray-900 dark:text-gray-100">
             New Site URL:
           </label>
           <input
@@ -81,7 +90,7 @@ const URLComparisonTool = () => {
             value={newSite}
             onChange={(e) => setNewSite(e.target.value)}
             required
-            className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500"
+            className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 dark:text-gray-100"
             placeholder="https://new-site.com"
           />
         </div>
@@ -111,7 +120,7 @@ const URLComparisonTool = () => {
           <div className="overflow-x-auto">
             <table className="min-w-full border-collapse border">
               <thead>
-                <tr className="bg-gray-100">
+                <tr className="bg-white dark:bg-gray-700 dark:text-gray-100">
                   <th className="border p-2">Original URL</th>
                   <th className="border p-2">Best Match URL</th>
                   <th className="border p-2">Similarity</th>
@@ -119,7 +128,7 @@ const URLComparisonTool = () => {
                 </tr>
               </thead>
               <tbody>
-                {Object.entries(results).map(([oldUrl, match]: [string, any]) => (
+                {Object.entries(results).map(([oldUrl, match]: [string, ComparisonResult]) => (
                   <tr key={oldUrl}>
                     <td className="border p-2 break-all">{oldUrl}</td>
                     <td className="border p-2 break-all">{match.url}</td>
