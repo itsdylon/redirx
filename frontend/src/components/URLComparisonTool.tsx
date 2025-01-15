@@ -140,7 +140,7 @@ const URLComparisonTool = () => {
             placeholder="https://old-site.com"
           />
         </div>
-        <SuggestionBox />
+        
         <div className="space-y-2">
           <label htmlFor="newSite" className="block font-medium text-white">
             New Site URL
@@ -278,7 +278,7 @@ const URLComparisonTool = () => {
         <h1 className="text-2xl font-bold text-[--primary]">RedirX</h1>
         <span className="text-sm text-[--text-secondary]">SEO-Optimized Redirect Generator</span>
       </div>
-
+      <SuggestionBox />
       {error && (
         <div className="bg-[--error] bg-opacity-10 border border-[--error] text-[--error] p-4 rounded-md">
           <div className="flex items-center gap-2">

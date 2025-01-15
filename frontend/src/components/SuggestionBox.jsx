@@ -8,9 +8,9 @@ const SuggestionBox = () => {
   const handleSubmit = (e) => {
     e.preventDefault();
     if (suggestion.trim()) {
-      const subject = encodeURIComponent('RedirX Suggestion');
+      const subject = encodeURIComponent('Portfolio Website Suggestion');
       const body = encodeURIComponent(suggestion);
-      window.location.href = `mailto:your-email@example.com?subject=${subject}&body=${body}`;
+      window.location.href = `mailto:reececoppage@gmail2.com?subject=${subject}&body=${body}`;
       setIsOpen(false);
       setSuggestion('');
     }
@@ -44,7 +44,7 @@ const SuggestionBox = () => {
               value={suggestion}
               onChange={(e) => setSuggestion(e.target.value)}
               placeholder="What would you like to suggest?"
-              className="w-full h-24 p-2 text-sm border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              className="w-full h-24 p-2 text-sm border rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
               required
             />
             <button
