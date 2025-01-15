@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { AlertCircle, CheckCircle2, XCircle, Trash2 } from 'lucide-react';
+import SuggestionBox from './SuggestionBox.jsx';
 
 interface ElementSimilarities {
   title?: number;
@@ -139,7 +140,11 @@ const URLComparisonTool = () => {
             placeholder="https://old-site.com"
           />
         </div>
-
+        <div className="flex items-center justify-between">
+  <h1 className="text-2xl font-bold">RedirX</h1>
+  <span className="text-sm text-gray-500">SEO-Optimized Redirect Generator</span>
+</div>
+<SuggestionBox />
         <div className="space-y-2">
           <label htmlFor="newSite" className="block font-medium text-white">
             New Site URL
