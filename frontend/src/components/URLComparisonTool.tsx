@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { AlertCircle, CheckCircle2, XCircle } from 'lucide-react';
+import { AlertCircle, CheckCircle2, XCircle, Trash2 } from 'lucide-react';
 
 interface ElementSimilarities {
   title?: number;
@@ -27,14 +27,48 @@ interface Results {
 }
 
 const URLComparisonTool = () => {
+  const [step, setStep] = useState(1);
   const [oldSite, setOldSite] = useState('');
   const [newSite, setNewSite] = useState('');
+  const [oldSiteLinks, setOldSiteLinks] = useState<string[]>([]);
+  const [selectedLinks, setSelectedLinks] = useState<string[]>([]);
   const [results, setResults] = useState<Results | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleInitialSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setLoading(true);
+    setError('');
+
+    try {
+      const response = await fetch('http://127.0.0.1:5000/compare-sites', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          old_site: oldSite,
+          scan_only: true
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      setOldSiteLinks(Object.keys(data));
+      setSelectedLinks(Object.keys(data));
+      setStep(2);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCompareLinks = async () => {
     setLoading(true);
     setError('');
     setResults(null);
@@ -48,6 +82,7 @@ const URLComparisonTool = () => {
         body: JSON.stringify({
           old_site: oldSite,
           new_site: newSite,
+          selected_urls: selectedLinks,
         }),
       });
 
@@ -57,11 +92,20 @@ const URLComparisonTool = () => {
 
       const data = await response.json();
       setResults(data);
+      setStep(3);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
       setLoading(false);
     }
+  };
+
+  const toggleLink = (link: string) => {
+    setSelectedLinks(prev => 
+      prev.includes(link)
+        ? prev.filter(l => l !== link)
+        : [...prev, link]
+    );
   };
 
   const generateRedirectRule = (oldUrl: string, newUrl: string): string => {
@@ -78,171 +122,175 @@ const URLComparisonTool = () => {
     return `${(value * 100).toFixed(1)}%`;
   };
 
-  const getMatchTypeDisplay = (result: ComparisonResult) => {
-    if (result.match_type === 'exact_url') {
-      return (
-        <div className="flex items-center text-green-600">
-          <CheckCircle2 className="w-4 h-4 mr-1" />
-          Exact URL Match
+  const renderStepOne = () => (
+    <form onSubmit={handleInitialSubmit} className="space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="space-y-2">
+          <label htmlFor="oldSite" className="block font-medium text-white">
+            Original Site URL
+          </label>
+          <input
+            id="oldSite"
+            type="url"
+            value={oldSite}
+            onChange={(e) => setOldSite(e.target.value)}
+            required
+            className="input w-full"
+            placeholder="https://old-site.com"
+          />
         </div>
-      );
-    }
-    return (
-      <div className="flex items-center text-blue-600">
-        <AlertCircle className="w-4 h-4 mr-1" />
-        Content Match
-      </div>
-    );
-  };
 
-  const getSimilarityColor = (value: number): string => {
-    if (value >= 0.8) return 'bg-green-100 text-green-800';
-    if (value >= 0.6) return 'bg-yellow-100 text-yellow-800';
-    return 'bg-red-100 text-red-800';
-  };
+        <div className="space-y-2">
+          <label htmlFor="newSite" className="block font-medium text-white">
+            New Site URL
+          </label>
+          <input
+            id="newSite"
+            type="url"
+            value={newSite}
+            onChange={(e) => setNewSite(e.target.value)}
+            required
+            className="input w-full"
+            placeholder="https://new-site.com"
+          />
+        </div>
+      </div>
+
+      <button
+        type="submit"
+        disabled={loading}
+        className="btn btn-primary w-full"
+      >
+        {loading ? 'Scanning Old Site...' : 'Start Redirect Analysis'}
+      </button>
+    </form>
+  );
+
+  const renderStepTwo = () => (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-semibold text-white">Select Links to Process</h2>
+        <div className="text-sm text-[--text-secondary]">
+          {selectedLinks.length} of {oldSiteLinks.length} selected
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="max-h-96 overflow-y-auto">
+          {oldSiteLinks.map((link) => (
+            <div
+              key={link}
+              className="flex items-center justify-between p-3 border-b border-[--surface-hover] last:border-b-0 card-hover"
+            >
+              <div className="flex items-center space-x-3">
+                <input
+                  type="checkbox"
+                  checked={selectedLinks.includes(link)}
+                  onChange={() => toggleLink(link)}
+                  className="h-4 w-4 bg-[--surface] border-[--surface-hover] text-[--primary] rounded"
+                />
+                <span className="text-sm break-all text-white">{link}</span>
+              </div>
+              <button
+                onClick={() => toggleLink(link)}
+                className="text-[--text-secondary] hover:text-[--error]"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex justify-between gap-4">
+        <button
+          onClick={() => setStep(1)}
+          className="btn btn-secondary flex-1"
+        >
+          Back
+        </button>
+        <button
+          onClick={handleCompareLinks}
+          disabled={loading || selectedLinks.length === 0}
+          className="btn btn-primary flex-1"
+        >
+          {loading ? 'Analyzing Links...' : 'Generate Redirects'}
+        </button>
+      </div>
+    </div>
+  );
+
+  const renderResults = () => (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-xl font-semibold text-white">Redirect Analysis Results</h2>
+        <button
+          onClick={() => setStep(2)}
+          className="text-[--primary] hover:text-[--primary-hover]"
+        >
+          Back to Link Selection
+        </button>
+      </div>
+      
+      {results && Object.entries(results).map(([oldUrl, result]) => (
+        <div key={oldUrl} className="card space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <h3 className="font-medium text-white">Original URL</h3>
+              <p className="text-sm break-all text-[--text-secondary]">{oldUrl}</p>
+            </div>
+            <div>
+              <h3 className="font-medium text-white">Matched URL</h3>
+              <p className="text-sm break-all text-[--text-secondary]">{result.url}</p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {result.match_type === 'exact_url' ? (
+              <div className="badge badge-success">
+                <CheckCircle2 className="h-4 w-4 mr-1" />
+                Exact Match
+              </div>
+            ) : (
+              <div className="badge badge-warning">
+                <AlertCircle className="h-4 w-4 mr-1" />
+                Content Match ({formatPercentage(result.similarity)})
+              </div>
+            )}
+          </div>
+
+          {result.redirect_needed && (
+            <div className="mt-2">
+              <div className="bg-[--surface] text-[--text-primary] p-3 rounded font-mono text-sm">
+                {generateRedirectRule(oldUrl, result.url!)}
+              </div>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 
   return (
     <div className="max-w-7xl mx-auto p-6 space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">RedirX</h1>
-        <span className="text-sm text-gray-500">SEO-Optimized Redirect Generator</span>
+        <h1 className="text-2xl font-bold text-[--primary]">RedirX</h1>
+        <span className="text-sm text-[--text-secondary]">SEO-Optimized Redirect Generator</span>
       </div>
-      
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="space-y-2">
-            <label htmlFor="oldSite" className="block font-medium text-gray-700">
-              Original Site URL
-            </label>
-            <input
-              id="oldSite"
-              type="url"
-              value={oldSite}
-              onChange={(e) => setOldSite(e.target.value)}
-              required
-              className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500"
-              placeholder="https://old-site.com"
-            />
-          </div>
-
-          <div className="space-y-2">
-            <label htmlFor="newSite" className="block font-medium text-gray-700">
-              New Site URL
-            </label>
-            <input
-              id="newSite"
-              type="url"
-              value={newSite}
-              onChange={(e) => setNewSite(e.target.value)}
-              required
-              className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500"
-              placeholder="https://new-site.com"
-            />
-          </div>
-        </div>
-
-        <button
-          type="submit"
-          disabled={loading}
-          className="w-full bg-blue-500 text-white p-3 rounded hover:bg-blue-600 disabled:bg-blue-300 font-medium"
-        >
-          {loading ? 'Analyzing Sites...' : 'Generate Redirects'}
-        </button>
-      </form>
 
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-md">
+        <div className="bg-[--error] bg-opacity-10 border border-[--error] text-[--error] p-4 rounded-md">
           <div className="flex items-center gap-2">
-            <XCircle className="h-4 w-4" />
+            <AlertCircle className="h-4 w-4" />
             <p className="font-semibold">Error</p>
           </div>
           <p className="mt-1">{error}</p>
         </div>
       )}
 
-      {results && (
-        <div className="space-y-6">
-          <h2 className="text-xl font-semibold">Redirect Analysis Results</h2>
-          
-          {Object.entries(results).map(([oldUrl, result]) => (
-            <div key={oldUrl} className="bg-white shadow rounded-lg p-4 space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <h3 className="font-medium text-gray-700">Original URL</h3>
-                  <p className="text-sm break-all">{oldUrl}</p>
-                </div>
-                <div>
-                  <h3 className="font-medium text-gray-700">Matched URL</h3>
-                  <p className="text-sm break-all">{result.url}</p>
-                </div>
-              </div>
-
-              <div className="border-t pt-4">
-                <div className="flex items-center justify-between">
-                  <div>{getMatchTypeDisplay(result)}</div>
-                  <div className={`px-2 py-1 rounded text-sm ${getSimilarityColor(result.similarity)}`}>
-                    Overall Match: {formatPercentage(result.similarity)}
-                  </div>
-                </div>
-
-                {result.match_type === 'content' && (
-                  <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <h4 className="text-sm font-medium text-gray-700">URL Similarity</h4>
-                      <div className="mt-1 h-2 bg-gray-200 rounded">
-                        <div
-                          className="h-2 bg-blue-500 rounded"
-                          style={{ width: `${(result.url_similarity || 0) * 100}%` }}
-                        />
-                      </div>
-                      <p className="text-sm text-gray-600 mt-1">
-                        {formatPercentage(result.url_similarity || 0)}
-                      </p>
-                    </div>
-                    <div>
-                      <h4 className="text-sm font-medium text-gray-700">Content Similarity</h4>
-                      <div className="mt-1 h-2 bg-gray-200 rounded">
-                        <div
-                          className="h-2 bg-blue-500 rounded"
-                          style={{ width: `${(result.content_similarity || 0) * 100}%` }}
-                        />
-                      </div>
-                      <p className="text-sm text-gray-600 mt-1">
-                        {formatPercentage(result.content_similarity || 0)}
-                      </p>
-                    </div>
-                  </div>
-                )}
-
-                {result.element_matches && (
-                  <div className="mt-4">
-                    <h4 className="text-sm font-medium text-gray-700 mb-2">Element Matches</h4>
-                    <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                      {Object.entries(result.element_matches).map(([element, similarity]) => (
-                        <div key={element} className="text-sm">
-                          <span className="text-gray-600">{element}:</span>{' '}
-                          <span className={getSimilarityColor(similarity)}>
-                            {formatPercentage(similarity)}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {result.redirect_needed && (
-                  <div className="mt-4">
-                    <h4 className="text-sm font-medium text-gray-700">Redirect Rule</h4>
-                    <code className="block p-2 bg-gray-50 rounded text-sm font-mono mt-1">
-                      {result.url && generateRedirectRule(oldUrl, result.url)}
-                    </code>
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      {step === 1 && renderStepOne()}
+      {step === 2 && renderStepTwo()}
+      {step === 3 && renderResults()}
     </div>
   );
 };

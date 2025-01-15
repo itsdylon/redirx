@@ -12,9 +12,11 @@ def compare_sites():
     data = request.json
     old_site_url = data.get('old_site')
     new_site_url = data.get('new_site')
+    scan_only = data.get('scan_only', False)
+    selected_urls = data.get('selected_urls', [])
 
-    if not old_site_url or not new_site_url:
-        return jsonify({"error": "Both old_site and new_site URLs are required"}), 400
+    if not old_site_url:
+        return jsonify({"error": "old_site URL is required"}), 400
     
     try:
         scraper = Scraper()
@@ -23,19 +25,44 @@ def compare_sites():
         
         print(f"\nScraping old site: {old_site_url}")
         old_pages = scraper.scrape_site(old_site_url)
-        print(f"\nScraping new site: {new_site_url}")
-        new_pages = scraper.scrape_site(new_site_url)
 
         if not old_pages:
             return jsonify({"error": f"No pages scraped from old site: {old_site_url}"}), 500
+
+        # If scan_only is True, return just the scraped pages
+        if scan_only:
+            # Convert sets to lists in the response
+            serializable_pages = {}
+            for url, page_data in old_pages.items():
+                serializable_pages[url] = {
+                    'mobile_content': page_data['mobile_content'],
+                    'desktop_content': page_data['desktop_content'],
+                    'html': page_data['html'],
+                    'links': list(page_data['links'])  # Convert set to list
+                }
+            return jsonify(serializable_pages)
+
+        # For comparison, we need the new site URL
+        if not new_site_url:
+            return jsonify({"error": "new_site URL is required for comparison"}), 400
+
+        print(f"\nScraping new site: {new_site_url}")
+        new_pages = scraper.scrape_site(new_site_url)
+
         if not new_pages:
             return jsonify({"error": f"No pages scraped from new site: {new_site_url}"}), 500
 
         results = {}
         
+        # Only process selected URLs if provided, otherwise process all
+        urls_to_process = selected_urls if selected_urls else old_pages.keys()
+        
         # Process each old URL
-        for old_url, old_page_data in old_pages.items():
-            # First check for URL pattern matches
+        for old_url in urls_to_process:
+            if old_url not in old_pages:
+                continue
+
+            old_page_data = old_pages[old_url]
             best_match = {"url": None, "similarity": 0, "match_type": None}
             
             # Check for exact slug matches first
@@ -91,7 +118,19 @@ def compare_sites():
                   f"(similarity: {best_match['similarity']:.2f}, "
                   f"type: {best_match['match_type']})")
 
-        return jsonify(results)
+        # Ensure all data is JSON serializable
+        serializable_results = {}
+        for url, result in results.items():
+            serializable_result = result.copy()
+            # Convert any sets to lists if they exist
+            if 'element_matches' in serializable_result:
+                serializable_result['element_matches'] = {
+                    k: list(v) if isinstance(v, set) else v 
+                    for k, v in serializable_result['element_matches'].items()
+                }
+            serializable_results[url] = serializable_result
+            
+        return jsonify(serializable_results)
     
     except Exception as e:
         print(f"Error in compare_sites: {str(e)}")
