@@ -1,8 +1,8 @@
 document.addEventListener("DOMContentLoaded", () => {
     const links = [
-      { oldUrl: "http://oldsite.com/page1", newUrl: "http://newsite.com/page1" },
-      { oldUrl: "http://oldsite.com/page2", newUrl: "http://newsite.com/page2" },
-      { oldUrl: "http://oldsite.com/page3", newUrl: "http://newsite.com/page3" },
+      { oldUrl: "http://oldsite.com/page1"},
+      { oldUrl: "http://oldsite.com/page2"},
+      { oldUrl: "http://oldsite.com/page3"},
     ];
   
     const linkTable = document.getElementById("linkTable");
@@ -13,9 +13,8 @@ document.addEventListener("DOMContentLoaded", () => {
     links.forEach((link, index) => {
       const row = document.createElement("tr");
       row.innerHTML = `
-        <td><input type="checkbox" class="redirectCheckbox" data-index="${index}"></td>
+        <td class="selectboxcontainer"><input type="checkbox" class="redirectCheckbox" data-index="${index}"></td>
         <td>${link.oldUrl}</td>
-        <td>${link.newUrl}</td>
       `;
       linkTable.appendChild(row);
     });

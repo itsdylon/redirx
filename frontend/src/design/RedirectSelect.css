@@ -17,3 +17,7 @@ body {
   .button {
     margin-top: 10px;
   }
+  #Select {
+    width: 75px;
+  }
+  
