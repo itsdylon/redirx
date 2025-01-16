@@ -85,7 +85,7 @@
 
   /* Badge Styles */
   .badge {
-    @apply px-2 py-1 rounded-full text-sm font-medium;
+    @apply px-2 py-1 rounded-full text-sm font-medium flex items-center;
   }
 
   .badge-success {

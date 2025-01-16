@@ -111,13 +111,17 @@ const URLComparisonTool = () => {
 
   const generateRedirectRule = (oldUrl: string, newUrl: string): string => {
     try {
+      const oldHostname = new URL(oldUrl).hostname;
       const oldPath = new URL(oldUrl).pathname;
       const newPath = new URL(newUrl).pathname;
-      return `Redirect 301 ${oldPath} ${newPath}`;
+      const newSlug = newPath.startsWith("/") ? newPath.slice(1) : newPath;
+      const redirectTarget = `https://${oldHostname}/${newSlug}`;
+      return `Redirect 301 ^${oldPath}/$ ${redirectTarget}`;
     } catch {
       return 'Invalid URL';
     }
   };
+  
 
   const formatPercentage = (value: number): string => {
     return `${(value * 100).toFixed(1)}%`;
