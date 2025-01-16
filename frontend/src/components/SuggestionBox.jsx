@@ -10,13 +10,12 @@ const SuggestionBox = () => {
     if (suggestion.trim()) {
       const subject = encodeURIComponent('Portfolio Website Suggestion');
       const body = encodeURIComponent(suggestion);
-      const recipients = "reececoppage@gmail1.com,dylongshattuck@gmail.com";
+      const recipients = "reececoppage1@gmail.com,dylongshattuck@gmail.com";
       window.location.href = `mailto:${recipients}?subject=${subject}&body=${body}`;
       setIsOpen(false);
       setSuggestion('');
     }
   };
-
 
   return (
     <div className="fixed top-4 right-4 z-50">
