@@ -1,0 +1,7 @@
+.venv/
+.vscode/
+frontend/
+__pycache__/
+*.pyc
+console_output.txt
+.git/

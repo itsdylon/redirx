@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { AlertCircle, CheckCircle2, XCircle, Trash2 } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Trash2 } from 'lucide-react';
 import SuggestionBox from './SuggestionBox.jsx';
 
 interface ElementSimilarities {
@@ -37,13 +37,17 @@ const URLComparisonTool = () => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
+  const API_URL = 'https://redirx-1069707477785.us-central1.run.app';
+
   const handleInitialSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError('');
+  
+
 
     try {
-      const response = await fetch('http://127.0.0.1:5000/compare-sites', {
+      const response = await fetch(API_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -75,7 +79,7 @@ const URLComparisonTool = () => {
     setResults(null);
 
     try {
-      const response = await fetch('http://127.0.0.1:5000/compare-sites', {
+      const response = await fetch(API_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
