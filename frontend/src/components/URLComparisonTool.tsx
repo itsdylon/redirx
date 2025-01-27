@@ -289,7 +289,7 @@ const URLComparisonTool = () => {
       </div>
       <SuggestionBox />
       {error && (
-        <div className="bg-[--error] bg-opacity-10 border border-[--error] text-[--error] p-4 rounded-md">
+        <div className="bg-[--error] bg-opacity-10 border border-[--error] text-[--background] p-4 rounded-md">
           <div className="flex items-center gap-2">
             <AlertCircle className="h-4 w-4" />
             <p className="font-semibold">Error</p>
