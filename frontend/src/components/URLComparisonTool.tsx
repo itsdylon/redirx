@@ -38,7 +38,7 @@ const URLComparisonTool = () => {
   const [loading, setLoading] = useState(false);
 
   //set in vercel env vars
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://redirx-1069707477785.us-central1.run.app';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://redirx-1069707477785.us-central1.run.app/compare-sites';
 
   const handleInitialSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
