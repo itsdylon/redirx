@@ -15,7 +15,7 @@ cors_origins = [
 # Enable CORS for all origins during testing
 CORS(app, resources={
     r"/*": {
-        "origins": "*",  # Allow all origins temporarily
+        "origins": cors_origins,  # Allow all origins temporarily
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"],
         "expose_headers": ["Content-Type", "Authorization"],
@@ -23,17 +23,6 @@ CORS(app, resources={
         "supports_credentials": True
     }
 })
-
-@app.route("/", methods=['GET', 'OPTIONS'])
-def health_check():
-    return jsonify({"status": "ok"})
-
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-    return response
 
 @app.route("/compare-sites", methods=['POST'])
 def compare_sites():
