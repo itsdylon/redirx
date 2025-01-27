@@ -9,18 +9,18 @@ app = Flask(__name__)
 
 #configure CORS
 cors_origins = [
-    "https://redirx-iota.vercel.app/"
+    "https://redirx-iota.vercel.app",
+    "http://localhost:3000"
 ]
 
-# Enable CORS for all origins during testing
+# Configure CORS for specific endpoint
 CORS(app, resources={
-    r"/*": {
-        "origins": cors_origins,  # Allow all origins temporarily
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"],
-        "expose_headers": ["Content-Type", "Authorization"],
+    "/compare-sites": {
+        "origins": cors_origins,
+        "methods": ["POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"],
         "max_age": 3600,
-        "supports_credentials": True
+        "supports_credentials": False  # Set to False unless you need credentials
     }
 })
 
