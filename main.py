@@ -3,9 +3,24 @@ from flask_cors import CORS
 from scraper import Scraper
 from url_matcher import URLMatcher
 from content_analyzer import ContentAnalyzer
+import os
 
 app = Flask(__name__)
-CORS(app)
+
+#configure CORS
+cors_origins = [
+    "https://redirx-iota.vercel.app/"
+]
+
+# Configure CORS with defined origins
+CORS(app, resources={
+    r"/*": {
+        "origins": cors_origins,
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "max_age": 3600
+    }
+})
 
 @app.route("/compare-sites", methods=['POST'])
 def compare_sites():
@@ -137,6 +152,5 @@ def compare_sites():
         return jsonify({"error": f"An error occurred: {str(e)}"}), 500
 
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
