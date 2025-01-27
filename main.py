@@ -15,7 +15,7 @@ cors_origins = [
 # Configure CORS with defined origins
 CORS(app, resources={
     r"/*": {
-        "origins": cors_origins,
+        "origins": "*",
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"],
         "max_age": 3600
