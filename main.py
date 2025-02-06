@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask import make_response
 from scraper import Scraper
 from url_matcher import URLMatcher
 from content_analyzer import ContentAnalyzer
@@ -26,6 +27,12 @@ CORS(app, resources={
 
 @app.route("/compare-sites", methods=['POST'])
 def compare_sites():
+    # Add CORS headers directly
+    response = make_response()
+    response.headers.add('Access-Control-Allow-Origin', 'https://redirx-iota.vercel.app')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+    response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+
     data = request.json
     old_site_url = data.get('old_site')
     new_site_url = data.get('new_site')
