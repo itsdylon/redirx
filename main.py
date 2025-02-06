@@ -10,6 +10,7 @@ app = Flask(__name__)
 #configure CORS
 cors_origins = [
     "https://redirx-iota.vercel.app",
+    "https://redirx-1069707477785.us-central1.run.app",
     "http://localhost:3000"
 ]
 
