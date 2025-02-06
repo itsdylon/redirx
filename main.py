@@ -11,6 +11,7 @@ app = Flask(__name__)
 cors_origins = [
     "https://redirx-iota.vercel.app",
     "https://redirx-1069707477785.us-central1.run.app",
+    "https://redirx-1069707477785.us-central1.run.app/compare-sites",
     "http://localhost:3000"
 ]
 
@@ -30,6 +31,7 @@ def compare_sites():
     response = make_response()
     response.headers.add('Access-Control-Allow-Origin', 'https://redirx-iota.vercel.app')
     response.headers.add('Access-Control-Allow-Origin', 'https://redirx-1069707477785.us-central1.run.app')
+    response.headers.add('Access-Control-Allow-Origin', 'https://redirx-1069707477785.us-central1.run.app/compare-sites')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
     response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
 
