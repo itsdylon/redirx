@@ -29,6 +29,7 @@ def compare_sites():
     # Add CORS headers directly
     response = make_response()
     response.headers.add('Access-Control-Allow-Origin', 'https://redirx-iota.vercel.app')
+    response.headers.add('Access-Control-Allow-Origin', 'https://redirx-1069707477785.us-central1.run.app')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
     response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
 
