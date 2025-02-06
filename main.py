@@ -1,6 +1,5 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
-from flask import make_response
 from scraper import Scraper
 from url_matcher import URLMatcher
 from content_analyzer import ContentAnalyzer
@@ -17,13 +16,12 @@ cors_origins = [
 # Configure CORS for specific endpoint
 CORS(app, resources={
     "/compare-sites": {
-        "origins": cors_origins,
         "methods": ["POST", "OPTIONS"],
         "allow_headers": ["Content-Type"],
         "max_age": 3600,
         "supports_credentials": False  # Set to False unless you need credentials
     }
-})
+}, origins=cors_origins)
 
 @app.route("/compare-sites", methods=['POST'])
 def compare_sites():
