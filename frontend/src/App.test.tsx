@@ -31,6 +31,8 @@ vi.mock('./components/QuickMatchLandingPage', () => ({
 vi.mock('./components/PivotCompanionPage', () => ({
   PivotCompanionPage: () => <div>Companion Page</div>,
 }));
+vi.mock('./components/CurrentBillingPage', () => ({ CurrentBillingPage: () => <div>Current Billing Page</div> }));
+vi.mock('./components/CurrentBillingReturn', () => ({ CurrentBillingReturn: () => <div>Verified Checkout Return</div> }));
 vi.mock('./components/ui/sonner', () => ({ Toaster: () => null }));
 
 function renderAt(path: string, pivotEnabled?: boolean) {
@@ -191,6 +193,8 @@ describe('unauthenticated pivot deep links', () => {
     '/companion?tab=history',
     '/migrations/migration-1?monitoring_id=monitor-1&checkout_id=oneoff-1',
     '/billing/subscriptions/return?checkout_id=subscription-1',
+    '/billing/current?migration_id=m1&old_inventory_id=o1&new_inventory_id=n1',
+    '/billing/current/return?checkout_id=c1',
   ])('preserves %s through the actual App login redirect', async target => {
     mockUseAuth.mockReturnValue({ user: null, loading: false });
     render(<MemoryRouter initialEntries={[target]}><App /><CurrentRoute /></MemoryRouter>);
@@ -277,5 +281,15 @@ describe('profile retry route barrier', () => {
     renderAt('/companion', true);
     await userEvent.setup().click(screen.getByRole('button', { name: 'Sign out' }));
     expect(logout).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('current billing access', () => {
+  it.each([true, false])('allows signed-in free users with pivot=%s', async pivotEnabled => {
+    mockUseAuth.mockReturnValue({ user: { id: 'u1', plan: 'free' }, loading: false });
+    const first = renderAt('/billing/current', pivotEnabled);
+    expect(await screen.findByText('Current Billing Page')).toBeInTheDocument(); first.unmount();
+    renderAt('/billing/current/return?checkout_id=c1', pivotEnabled);
+    expect(await screen.findByText('Verified Checkout Return')).toBeInTheDocument();
   });
 });

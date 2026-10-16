@@ -18,7 +18,7 @@ export interface PivotMatch {
 }
 export interface MigrationDetail {
   jev?: JevRun; migration?: PivotMigration; summary?: string; run_id?: string; quote_id?: string;
-  run?: { status: string; progress?: { current_stage: number | null; total_stages: number | null } };
+  run?: { inventory_ids?: { old: string; new: string }; status: string; progress?: { current_stage: number | null; total_stages: number | null } };
   quote?: { amount_cents: number; currency: string; kind: string };
   artifact?: { artifact_id: string; format: string; included_count: number; excluded_count: number };
   deployment_id?: string; monitoring_id?: string;

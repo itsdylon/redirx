@@ -63,6 +63,7 @@ def create_app():
     if os.getenv("MCP_PIVOT_ENABLED", "false").lower() == "true":
         from backend.routes.v2_routes import v2_blueprint
         from backend.routes.migration_checkout_routes import create_migration_checkout_blueprint
+        from backend.routes.current_billing_routes import create_current_billing_blueprint
         from backend.routes.migration_gsc_routes import create_migration_gsc_blueprint
         from backend.routes.migration_discovery_routes import create_migration_discovery_blueprint
         from backend.routes.migration_mapping_routes import create_migration_mapping_blueprint
@@ -70,6 +71,7 @@ def create_app():
         from backend.routes.migration_artifact_routes import create_migration_artifact_blueprint
         app.register_blueprint(v2_blueprint, url_prefix="/api/v2")
         app.register_blueprint(create_migration_checkout_blueprint(), url_prefix="/api/v2")
+        app.register_blueprint(create_current_billing_blueprint(), url_prefix="/api/v2")
         app.register_blueprint(create_migration_gsc_blueprint(), url_prefix="/api/v2")
         app.register_blueprint(create_migration_discovery_blueprint(), url_prefix="/api/v2")
         app.register_blueprint(create_migration_mapping_blueprint(), url_prefix="/api/v2")

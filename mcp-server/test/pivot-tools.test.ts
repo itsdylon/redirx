@@ -66,7 +66,9 @@ describe('opt-in pivot MCP tools', () => {
       ]);
       const run = result.tools.find(tool => tool.name === 'run_migration')!;
       expect(run.inputSchema.properties).not.toHaveProperty('grant_id');
-      expect(run.inputSchema.properties).not.toHaveProperty('subscription_id');
+      expect(run.inputSchema.properties).toHaveProperty('subscription_id');
+      expect(run.inputSchema.properties).toHaveProperty('checkout_id');
+      expect(run.inputSchema.properties).toHaveProperty('max_extra_amount_cents');
       expect(run.inputSchema.properties).not.toHaveProperty('rerun_of');
       expect(run.inputSchema.properties).toHaveProperty('quote_id');
     } finally { await close(); }
@@ -94,7 +96,7 @@ describe('opt-in pivot MCP tools', () => {
     try {
       const base = { migration_id: ids.migration, side: 'old', urls: ['https://old.test/a'], idempotency_key: 'import' };
       for (const change of [{ side: 'other' }, { urls: [] }, { urls: ['file:///private/file'] },
-        { urls: Array(2001).fill('https://old.test/a') }, { urls: Array(1000).fill('https://old.test/' + 'x'.repeat(3000)) }]) {
+        { urls: Array(20001).fill('https://old.test/a') }, { urls: Array(6000).fill('https://old.test/' + 'x'.repeat(3000)) }]) {
         expect((await client.callTool({ name: 'import_inventory', arguments: { ...base, ...change } })).isError).toBe(true);
       }
       expect(fetchMock).not.toHaveBeenCalled();
@@ -218,18 +220,18 @@ describe('opt-in pivot MCP tools', () => {
     } finally { await close(); }
   });
 
-  it('drops legacy paid-plan fields from run_migration instead of forwarding them', async () => {
+  it('forwards current paid consent while dropping legacy grant and rerun fields', async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(envelope({ run_id: ids.run }, { status: 'queued', next_action: 'poll' })), { headers: { 'content-type': 'application/json' } }));
     const { client, close } = await connected();
     try {
       await client.callTool({ name: 'run_migration', arguments: { migration_id: ids.migration,
         old_inventory_id: ids.run, new_inventory_id: ids.mapping, quote_id: ids.mapping,
         // @ts-expect-error legacy fields are no longer part of the advertised schema
-        grant_id: ids.run, subscription_id: ids.mapping, rerun_of: ids.run, idempotency_key: 'jev-run' } });
+        grant_id: ids.run, subscription_id: ids.mapping, checkout_id: ids.run, approve_extra_urls: true, max_extra_amount_cents: 1200, rerun_of: ids.run, idempotency_key: 'jev-run' } });
       const body = JSON.parse(fetchMock.mock.calls[0][1].body);
       expect(body).toMatchObject({ quote_id: ids.mapping, inventory_ids: { old: ids.run, new: ids.mapping }, idempotency_key: 'jev-run' });
       expect(body).not.toHaveProperty('grant_id');
-      expect(body).not.toHaveProperty('subscription_id');
+      expect(body).toMatchObject({ subscription_id: ids.mapping, checkout_id: ids.run, approve_extra_urls: true, max_extra_amount_cents: 1200 });
       expect(body).not.toHaveProperty('rerun_of');
     } finally { await close(); }
   });

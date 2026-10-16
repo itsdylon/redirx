@@ -72,7 +72,7 @@ npm test --prefix mcp-auth-server
 npm test --prefix database/tests
 ```
 
-OAuth tests launch and clean up embedded PostgreSQL. The SQL package runs its seven
+OAuth tests launch and clean up embedded PostgreSQL. The SQL package runs its
 `*.test.mjs` files with PGlite; the separate historical billing `.postgres.mjs`
 acceptance scripts are not part of this lean gate.
 
@@ -87,3 +87,10 @@ acceptance scripts are not part of this lean gate.
 - After the workflow has run, the owner can require **Frontend**, **Backend
   contracts**, and **MCP, OAuth and SQL** in main's branch protection. Adding the
   workflow itself does not change branch-protection settings.
+
+Current billing adds SDK-constrained Stripe adapter and route tests to the required
+backend gate. The backend job also runs `current-billing.test.mjs` with native
+PostgreSQL, two concurrent clients, and the Python paid worker fixture. That fixture
+executes 501 URLs, retries saved progress, and verifies completed exports after the
+work window expires; it uses a synthetic decision provider. The ordinary PGlite
+command skips those three native-only cases. No test makes a Stripe purchase.

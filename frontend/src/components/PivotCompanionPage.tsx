@@ -31,6 +31,7 @@ export function PivotCompanionPage() {
   return <ToolLayout title="Migration companion"><main className="mx-auto max-w-4xl space-y-8 py-4">
     <header className="space-y-3">
       <h1 className="text-3xl font-semibold">Your migrations</h1>
+      <Link to="/billing/current" className="text-sm underline">Plans and billing</Link>
       <p className="max-w-prose text-muted-foreground">Start a free URL migration in your MCP client. Import old and new URL lists, review proposed destinations here, then export the reviewed map.</p>
     </header>
     <section className="space-y-3 border-t pt-6" aria-labelledby="connect-heading">

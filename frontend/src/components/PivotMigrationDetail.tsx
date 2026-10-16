@@ -185,6 +185,7 @@ export function PivotMigrationDetail() {
   return <ToolLayout title="Migration detail"><main className="mx-auto max-w-4xl space-y-8 py-4">
     <header className="space-y-3">
       <Link to="/companion" className="text-sm underline">All migrations</Link>
+      <Link to={`/billing/current?${new URLSearchParams({ migration_id: migrationId, ...(data?.run?.inventory_ids ? { old_inventory_id: data.run.inventory_ids.old, new_inventory_id: data.run.inventory_ids.new } : {}) })}`} className="block text-sm underline">Plans and billing for this migration</Link>
       <h1 className="break-words text-3xl font-semibold">{data?.migration?.name || 'Migration detail'}</h1>
       <p className="break-all text-sm text-muted-foreground">{migrationId}</p>
       <Button variant="outline" disabled={busy || loading} onClick={() => setRefresh(n => n + 1)}>Refresh status</Button>

@@ -189,7 +189,7 @@ class MigrationArtifactService:
             raise RepositoryUnavailableError("Export entitlement is temporarily unavailable.") from None
         state = grant.get("state") if isinstance(grant, Mapping) else getattr(grant, "state", None)
         authority = grant.get("authority") if isinstance(grant, Mapping) else getattr(grant, "authority", None)
-        if state not in {"active", "succeeded"} or authority not in {"quote_grant", "studio"}:
+        if state not in {"active", "succeeded"} or authority not in {"quote_grant", "studio", "current_billing"}:
             raise EntitlementRequiredError("An owned export grant is required before creating an artifact.")
 
     def _replay_artifact(self, owner: str, migration: str, run: str, key: str,
@@ -316,7 +316,7 @@ class MigrationArtifactService:
         authority = self.download_grant_reader(owner, migration, artifact)
         state = authority.get("state") if isinstance(authority, Mapping) else getattr(authority, "state", None)
         authority_kind = authority.get("authority") if isinstance(authority, Mapping) else getattr(authority, "authority", None)
-        if state not in {"active", "succeeded"} or authority_kind not in {"quote_grant", "studio"}:
+        if state not in {"active", "succeeded"} or authority_kind not in {"quote_grant", "studio", "current_billing"}:
             raise EntitlementRequiredError("An owned export grant is required to download this artifact.")
         result = (self.client.table("migration_artifact_contents").select("*")
                   .eq("artifact_id", str(artifact)).eq("migration_id", migration)

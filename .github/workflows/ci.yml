@@ -66,6 +66,13 @@ jobs:
           cache-dependency-path: requirements.txt
       - run: python -m pip install -r requirements.txt
       - run: python scripts/ci/backend.py
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - run: npm ci --prefix mcp-auth-server --no-audit --no-fund
+      - run: npm ci --prefix database/tests --no-audit --no-fund
+      - name: Paid admission, concurrency and worker contracts
+        run: CURRENT_BILLING_POSTGRES=1 CURRENT_BILLING_PYTHON=python QUOTE_PG_MODULE_ROOT="$GITHUB_WORKSPACE/mcp-auth-server/node_modules" node --test database/tests/current-billing.test.mjs
 
   services:
     name: MCP, OAuth and SQL

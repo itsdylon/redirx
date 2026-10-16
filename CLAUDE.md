@@ -51,6 +51,12 @@ framework, plugin registry or parallel implementation of the same policy.
 - Current limits: 500 old / 2000 new URLs, 2 MiB raw URLs, five new runs per rolling
   24 hours, three passes, at most 100 initial confirmed pairs. Database authority
   wins over UI hints. One concurrent run is the measured worker envelope.
+  The October billing PR adds an explicitly owner-requested, opt-in paid path
+  (`REDIRX_CURRENT_BILLING_ENABLED`): one separate 500-URL trial, paid capacity
+  15,000 old / 20,000 new URLs and 16 MiB, pooled monthly allowances and approved
+  extras. This is an admission ceiling, not a measured throughput claim. The
+  global provider budget and worker concurrency remain unchanged. See
+  `docs/billing/current-checkout.md`; do not activate production from this guide.
 - `jev_database_transport.py` may retry bounded reads once; never extend that to
   RPC mutations or model calls. Preserve finite diagnostic allowlists; no provider
   payloads, credentials or arbitrary exception text in telemetry.
@@ -58,6 +64,7 @@ framework, plugin registry or parallel implementation of the same policy.
   identity remain strict. A health response alone is not authenticated acceptance.
 - Applied SQL migrations are history: do not rewrite/drop them during cleanup.
   Keep Jev migration 062 and markers; do not enable deferred billing 059–061.
+  Current catalog migrations 063–064 are additive and do not require 059–061.
   Disabling new admissions does not authorize rolling back the worker to pre-Jev.
 
 ## Historical/shared code

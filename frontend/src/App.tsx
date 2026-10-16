@@ -35,6 +35,9 @@ const ApiKeysPage = lazy(() => import('./components/ApiKeysPage').then(module =>
 const PivotCompanionPage = lazy(() => import('./components/PivotCompanionPage').then(module => ({ default: module.PivotCompanionPage })));
 const PivotMigrationDetail = lazy(() => import('./components/PivotMigrationDetail').then(module => ({ default: module.PivotMigrationDetail })));
 
+const CurrentBillingPage = lazy(() => import('./components/CurrentBillingPage').then(module => ({ default: module.CurrentBillingPage })));
+const CurrentBillingReturn = lazy(() => import('./components/CurrentBillingReturn').then(module => ({ default: module.CurrentBillingReturn })));
+
 const routeLoading = (
   <div className="min-h-screen flex items-center justify-center" role="status">
     <div className="text-muted-foreground">Loading...</div>
@@ -112,6 +115,8 @@ export default function App({ pivotEnabled = MCP_PIVOT_ENABLED }: { pivotEnabled
         />
         <Route path={ROUTES.companion} element={user ? (pivotEnabled ? <PivotCompanionPage /> : <Navigate to={ROUTES.quickMatch} replace />) : <Navigate to={loginWithReturn} replace />} />
         <Route path={ROUTES.migration} element={user ? (pivotEnabled ? <PivotMigrationDetail /> : <Navigate to={ROUTES.quickMatch} replace />) : <Navigate to={loginWithReturn} replace />} />
+        <Route path={ROUTES.currentBilling} element={user ? <CurrentBillingPage key={user.id + location.search} /> : <Navigate to={loginWithReturn} replace />} />
+        <Route path={ROUTES.currentBillingReturn} element={user ? <CurrentBillingReturn key={user.id + location.search} /> : <Navigate to={loginWithReturn} replace />} />
         <Route path="/billing/subscriptions/return" element={user
           ? (pivotEnabled ? <PivotCompanionPage /> : <Navigate to={authedHome} replace />)
           : <Navigate to={loginWithReturn} replace />} />

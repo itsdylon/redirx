@@ -18,6 +18,8 @@ export const ROUTES = {
   watch: '/watch/:watchId',
   apiKeys: '/api-keys',
   companion: '/companion',
+  currentBilling: '/billing/current',
+  currentBillingReturn: '/billing/current/return',
   migration: '/migrations/:migrationId',
 } as const;
 

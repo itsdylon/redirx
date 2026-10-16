@@ -113,14 +113,30 @@ class MigrationRunService:
             'p_max_new_urls': PIVOT_CONTENT_MAX_NEW_URLS,
         })
 
+    def _dispatch_activation(self, job):
+        try:
+            state = read_jev_state(self.repository.client, job['mcp_run_id'])
+        except Exception as exc:
+            # Pre-062 historical databases have no marker table. Storage and
+            # transport outages must still fail closed, never select an engine.
+            if getattr(exc,'code',None) != '42P01' and getattr(exc,'sqlstate',None) != '42P01':
+                raise
+            state = None
+        if state and state.get('billing_version') == 'redirx_2026_10':
+            from .jev_pipeline_service import current_billing_enabled, enabled
+            if not current_billing_enabled() or not enabled():
+                raise QuoteNotReadyError('Current run execution is paused.')
+            return 'redirx_2026_10'
+        return _activation()
+
     def authorize_dispatch(self, job, worker_id):
         return self._call('authorize_migration_run_dispatch', {
-            **self._worker_params(job, worker_id), 'p_activation': _activation(),
+            **self._worker_params(job, worker_id), 'p_activation': self._dispatch_activation(job),
         })
 
     def finalize_session(self, job, worker_id, status, error=None):
         if status == 'completed':
-            _activation()
+            self._dispatch_activation(job)
         # Read the pre-call session status so a terminal outcome fires exactly
         # once. finalize_migration_run_session's own early-return branch (an
         # already-terminal session, e.g. a retried worker call after a lost

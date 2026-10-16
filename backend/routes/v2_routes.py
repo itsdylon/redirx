@@ -72,10 +72,28 @@ def repository_error(exc):
             error={'code': 'rate_limited', 'message': str(exc), 'retryable': True, 'next_action': 'retry'})
         payload['retry_after_seconds'] = exc.retry_after_seconds
         return jsonify(payload), 429, {'Retry-After': str(exc.retry_after_seconds)}
+    if exc.code == 'payment_required' and os.getenv('REDIRX_CURRENT_BILLING_ENABLED','false').lower() == 'true':
+        from urllib.parse import urlencode, urlsplit
+        value=request.get_json(silent=True) or {}
+        inventories=value.get('inventory_ids',{})
+        origin=os.getenv('MCP_CHECKOUT_COMPANION_ORIGIN','').rstrip('/')
+        parsed=urlsplit(origin)
+        data={}
+        if (parsed.hostname and not parsed.username and not parsed.password and not parsed.path and not parsed.query and not parsed.fragment
+                and (parsed.scheme=='https' or (os.getenv('REDIRX_STRIPE_MODE','test')=='test' and parsed.scheme=='http' and parsed.hostname in ('localhost','127.0.0.1','::1')))
+                and isinstance(inventories,dict) and set(inventories)=={'old','new'}):
+            data['billing_url']=origin+'/billing/current?'+urlencode({'migration_id':(request.view_args or {}).get('migration_id'),
+                'old_inventory_id':inventories['old'],'new_inventory_id':inventories['new']})
+        return jsonify(envelope((request.view_args or {}).get('migration_id'),status='payment_required',next_action='complete_payment',data=data,
+            error={'code':exc.code,'message':str(exc),'retryable':False,'next_action':'complete_payment'})),402
+    if exc.code == 'approval_required':
+        return jsonify(envelope((request.view_args or {}).get('migration_id'), status='needs_input',
+            next_action='approve_extra_urls', data=exc.details,
+            error={'code': exc.code, 'message': str(exc), 'retryable': False, 'next_action': 'approve_extra_urls'})), 409
     code = 'operation_conflict' if exc.code == 'inventory_busy' else exc.code
     http_status = {'not_found': 404, 'invalid_input': 400, 'operation_conflict': 409,
                    'capacity_exceeded': 413, 'quote_expired': 409,
-                   'inventory_incomplete': 409, 'payment_required': 402}.get(code, 503)
+                   'inventory_incomplete': 409, 'payment_required': 402, 'approval_required': 409}.get(code, 503)
     return failure(code, str(exc), http_status, exc.retryable,
                    getattr(exc, 'next_action', 'retry' if exc.retryable else 'none'))
 
@@ -179,7 +197,7 @@ def operation_status(operation_id):
 @authenticated
 @limiter.limit('30 per minute', key_func=account_limit_key)
 def run_migration(migration_id):
-    value = body({'inventory_ids', 'quote_id', 'grant_id', 'subscription_id', 'rerun_of', 'idempotency_key','confirmed_pairs'})
+    value = body({'inventory_ids', 'quote_id', 'grant_id', 'subscription_id', 'rerun_of', 'idempotency_key','confirmed_pairs','checkout_id','approve_extra_urls','max_extra_amount_cents'})
     if value.get('confirmed_pairs') is not None and os.getenv('JEV_MVP_ENABLED','false').lower() != 'true':
         raise InvalidInputError('Confirmed examples require the Jev workflow.')
     if value.get('grant_id') is not None and value.get('subscription_id') is not None:
@@ -188,6 +206,21 @@ def run_migration(migration_id):
     inventories = value.get('inventory_ids')
     if not isinstance(inventories, dict) or set(inventories) != {'old', 'new'}:
         raise InvalidInputError('inventory_ids must contain exactly old and new snapshot IDs.')
+    from backend.services.jev_pipeline_service import current_billing_enabled, PAID_LIMITS
+    if current_billing_enabled():
+        from backend.services.jev_pipeline_service import JevService, LIMITS
+        if any(value.get(field) is not None for field in ('quote_id','grant_id','rerun_of')):
+            raise InvalidInputError('Current runs use checkout_id or subscription_id; refine an existing run to retry it.')
+        result = JevService().start_current(request.api_user_id,migration_id,inventories['old'],inventories['new'],key,
+            value.get('confirmed_pairs'),value.get('checkout_id'),value.get('subscription_id'),
+            value.get('approve_extra_urls',False),value.get('max_extra_amount_cents',0))
+        if not result['replayed']:
+            capture(AppEvent.MIGRATION_RUN_STARTED,user_id=request.api_user_id,migration_id=migration_id,
+                properties={'run_id':result['run_id'],'operation_id':result['operation_id'],'engine':'jev-url-v1','metered':not result['free']})
+        return jsonify(envelope(migration_id,result['operation_id'],status=result['status'],next_action='poll',
+            data={**result,'engine':'jev-url-v1','limits':LIMITS if result['free'] else PAID_LIMITS}))
+    if any(value.get(field) is not None for field in ('checkout_id','approve_extra_urls','max_extra_amount_cents')):
+        raise InvalidInputError('Current paid admission is not enabled.')
     quotes = MigrationQuoteService()
     # Keep automatic quote identity stable across payment and retries. A caller
     # cannot silently replace its reserved run's quote by omitting quote_id.

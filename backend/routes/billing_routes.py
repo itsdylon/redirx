@@ -211,6 +211,10 @@ def create_or_refresh_quote():
 @billing_blueprint.route("/project/checkout", methods=["POST"])
 @require_auth
 def create_project_checkout():
+    from backend.services.current_billing_service import enabled
+    if enabled():
+        return error_response(code='billing_catalog_changed', user_message='Open current billing to purchase a migration.',
+                              status=409, retryable=False, next_action='refresh')
     data = request.get_json(silent=True) or {}
     source_session_id = data.get("source_session_id")
     quote_id = data.get("quote_id")
@@ -318,6 +322,10 @@ def create_project_checkout():
 @billing_blueprint.route("/agency/checkout", methods=["POST"])
 @require_auth
 def create_agency_checkout():
+    from backend.services.current_billing_service import enabled
+    if enabled():
+        return error_response(code='billing_catalog_changed', user_message='Open current billing to choose a monthly plan.',
+                              status=409, retryable=False, next_action='refresh')
     data = request.get_json(silent=True) or {}
     billing_cycle = str(data.get("billing_cycle") or "monthly").lower()
 
