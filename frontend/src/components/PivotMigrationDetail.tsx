@@ -405,7 +405,7 @@ function MigrationDetailContent({ migrationId }: { migrationId: string }) {
       {!loading && !reviewReady && message && <p className="text-sm">Refresh status to load current mapping revisions before making another decision. Your typed destinations are preserved.</p>}
       <p className="text-sm text-muted-foreground">Approve only a relevant destination. Leave uncertain decisions for review with your agent.</p>
       <label className="block space-y-2 text-sm">Show mappings
-        <select className="block rounded-md border border-input bg-background px-3 py-2" value={matchFilter}
+        <select className="block max-w-full rounded-md border border-input bg-background px-3 py-2" value={matchFilter}
           disabled={busy || loading} onChange={event => { loadedPages.current = 1; pageSize.current = 20; setRows([]); setNext(null); setMatchesLoaded(false); setSavedMessage(''); setFeedback(null); setFind(''); setOrder('traffic'); setMatchFilter(event.target.value as PivotMatchFilter); }}>
           <option value="all">All mappings</option>
           <option value="needs_review">Needs review or deferred</option>
@@ -430,7 +430,7 @@ function MigrationDetailContent({ migrationId }: { migrationId: string }) {
       {data.run?.status !== 'succeeded' && <p className="text-sm text-muted-foreground">This run has not completed successfully. Saved mappings may be incomplete.</p>}
       {!loading && matchesLoaded && <p className="text-sm text-muted-foreground">{rows.length} saved {rows.length === 1 ? 'mapping' : 'mappings'} loaded for this filter{next ? '; more available' : ''}.</p>}
       {!loading && matchesLoaded && reviewReady && <p role="status" className="text-sm">{visibleRows.length} shown{next ? '. Find and ordering cover loaded mappings only; more remain on the server.' : '. All saved mappings for this filter are loaded.'}</p>}
-      {next && isJev && <Button variant="outline" disabled={reviewDisabled} onClick={() => void more(true)}>Load up to 500 mappings for this filter</Button>}
+      {next && isJev && <Button className="h-auto max-w-full whitespace-normal" variant="outline" disabled={reviewDisabled} onClick={() => void more(true)}>Load up to 500 mappings for this filter</Button>}
       {!loading && matchesLoaded && !rows.length && <p className="text-sm">No saved mappings match this filter.</p>}
       {!loading && matchesLoaded && rows.length > 0 && !visibleRows.length && <p className="text-sm">No loaded URLs match your search.{next ? ' Load more mappings or clear the search.' : ' Clear the search or choose another review filter.'}</p>}
       <ul className="divide-y" aria-label="Mapping decisions" aria-busy={loading || pageLoading}>{visibleRows.map(row => <MappingReviewRow key={row.mapping_id} row={row} draft={targets[row.mapping_id] || ''}
