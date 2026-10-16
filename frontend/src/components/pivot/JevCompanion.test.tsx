@@ -28,6 +28,18 @@ beforeEach(()=>{
 });
 afterEach(()=>{cleanup();localStorage.clear();vi.unstubAllGlobals();});
 describe('free Jev companion with actual API transport',()=>{
+ it.each([true, false])('billing link preserves exact run inventories when available=%s', async available => {
+  vi.stubGlobal('fetch', vi.fn(async () => json(envelope({ migration: { id: 'm1' },
+    run: { status: 'succeeded', ...(available ? { inventory_ids: { old: 'owned-old', new: 'owned-new' } } : {}) }
+  }))));
+  mount(); await screen.findByText('Status: succeeded');
+  const link = screen.getByRole('link', { name: 'Plans and billing for this migration' });
+  const url = new URL(link.getAttribute('href')!, 'https://fixture.test');
+  expect(Object.fromEntries(url.searchParams)).toEqual(available
+    ? { migration_id: 'm1', old_inventory_id: 'owned-old', new_inventory_id: 'owned-new' }
+    : { migration_id: 'm1' });
+ });
+
  it('labels model proposals and saves confirmation only through revision-bound set_target',async()=>{
   const user=userEvent.setup();mount();await screen.findByText('Proposed destination: https://new.test/a');
   expect(screen.getByRole('heading',{name:'Free URL mapping'})).toBeInTheDocument();

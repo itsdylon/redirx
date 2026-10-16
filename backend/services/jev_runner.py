@@ -67,8 +67,16 @@ class JevPipelineRunner:
         from src.redirx.jev.retrieve import Retriever
         from src.redirx.jev.pipeline import Config, map_page
         old_urls=job['old_urls'];new_urls=job['new_urls']
-        if not 1 <= len(old_urls) <= 500 or not 1 <= len(new_urls) <= 2000 or sum(len(url.encode()) for url in old_urls+new_urls)>2097152:
-            raise ValueError('Jev inventory capacity exceeded (500 old, 2000 new, 2 MiB URLs).')
+        from .jev_pipeline_service import current_billing_enabled, LIMITS, PAID_LIMITS
+        from .jev_store import read_jev_state
+        marker=read_jev_state(self.client,job['mcp_run_id'])
+        current=marker and marker.get('billing_version')=='redirx_2026_10'
+        if current and not current_billing_enabled():
+            raise ProviderUnavailable('current_billing_paused')
+        limits=PAID_LIMITS if current and marker.get('billing_sku') in ('payg','studio','agency') else LIMITS
+        if (not 1 <= len(old_urls) <= limits['old_pages'] or not 1 <= len(new_urls) <= limits['new_pages']
+                or sum(len(url.encode()) for url in old_urls+new_urls)>limits['inventory_bytes']):
+            raise ValueError('Jev inventory capacity exceeded.')
         store=DurableStore(self.client,job,worker_id)
         state=store.rpc('prepare_jev_pass')
         if state['model'] != MODEL or state['prompt_version'] != PROMPT_VERSION:
@@ -83,7 +91,11 @@ class JevPipelineRunner:
         retriever.prime_queries(old)
         if seeds: retriever.calibrate(seeds)
         bank=ExampleBank(seeds);provider=self.provider_factory(store)
-        rows=database_read(lambda:self.client.table('jev_proposals').select('old_url,pass').eq('run_id',site).limit(500).execute().data)
+        rows=[]
+        for offset in range(0,limits['old_pages'],500):
+            page=database_read(lambda:self.client.table('jev_proposals').select('old_url,pass').eq('run_id',site).order('old_url_hash').range(offset,offset+499).execute().data)
+            rows.extend(page)
+            if len(page)<500: break
         done={row['old_url'] for row in rows if row['pass']==state['pass']}
         confirmed={row['old_url'] for row in state['seeds']}
         progress(UUID(str(job['id'])),2,'Jev: propose URL mappings',3)

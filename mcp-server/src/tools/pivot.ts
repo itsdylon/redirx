@@ -98,19 +98,19 @@ export function registerPivotTools(server: McpServer): void {
   }, (args, extra) => call(extra as ToolExtra, 'POST', '/migrations', args));
 
   server.registerTool('import_inventory', {
-    title: 'Import a URL inventory', description: 'Import explicit HTTP(S) URL strings into an owned immutable old or new inventory. No crawl or page scraping. Use data.inventory.id only when data.inventory.status is complete for run_migration; partial imports need corrected input and a new key. Free Jev runs allow 500 unique old URLs, 2000 new URLs and 2 MiB URL text total.',
-    inputSchema: { migration_id: UUID, side: z.enum(['old', 'new']), urls: z.array(z.string().url().max(8192).regex(/^https?:\/\//i)).min(1).max(2000), idempotency_key: IDEMPOTENCY },
+    title: 'Import a URL inventory', description: 'Import explicit HTTP(S) URL strings into an owned immutable old or new inventory. No crawl or page scraping. Use data.inventory.id only when data.inventory.status is complete for run_migration. The free trial allows 500 old / 2000 new URLs and 2 MiB total URL text. When paid billing is enabled, paid runs allow 15000 old / 20000 new URLs and 16 MiB total. Importing never authorizes a charge.',
+    inputSchema: { migration_id: UUID, side: z.enum(['old', 'new']), urls: z.array(z.string().url().max(8192).regex(/^https?:\/\//i)).min(1).max(20000), idempotency_key: IDEMPOTENCY },
     annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: false },
   }, ({ migration_id, urls, ...args }, extra) => {
-    if (urls.reduce((bytes, url) => bytes + Buffer.byteLength(url, 'utf8'), 0) > 2097152) {
-      return invalidInput('URL text exceeds the 2 MiB free Jev input limit.');
+    if (urls.reduce((bytes, url) => bytes + Buffer.byteLength(url, 'utf8'), 0) > 16777216) {
+      return invalidInput('URL text exceeds the 16 MiB paid input limit.');
     }
     return call(extra as ToolExtra, 'POST', `/migrations/${encodeURIComponent(migration_id)}/inventories`, { ...args, rows: urls });
   });
 
   server.registerTool('run_migration', {
-    title: 'Run a migration', description: 'Run the free Jev URL harness from immutable inventories: up to 500 old pages, 2000 new pages, 2 MiB URL text and five new runs per rolling 24 hours. No page-content scraping. Optional confirmed_pairs are explicitly verified old_url/new_url examples from these exact inventories, never guessed labels.',
-    inputSchema: { migration_id: UUID, old_inventory_id: UUID, new_inventory_id: UUID, quote_id: UUID.optional(), confirmed_pairs: z.array(z.object({ old_url: z.string().url().max(8192), new_url: z.string().url().max(8192) })).max(100).optional(), idempotency_key: IDEMPOTENCY },
+    title: 'Run a migration', description: 'Run URL matching from immutable inventories. When current billing is enabled, the separate free trial allows 500 old URLs; paid purchases or monthly allowances support 15000 old / 20000 new URLs. Payment-required responses provide a browser billing link. Only a human completes checkout. Pass its verified checkout_id for a one-time purchase or select a subscription_id. Never approve extra URLs without explicit user consent to max_extra_amount_cents, the TOTAL extra-usage charge for this month after this run, not an incremental charge. Included retries and refinements do not buy URLs again. confirmed_pairs must be explicitly verified examples, never guesses.',
+    inputSchema: { migration_id: UUID, old_inventory_id: UUID, new_inventory_id: UUID, quote_id: UUID.optional(), checkout_id: UUID.optional(), subscription_id: UUID.optional(), approve_extra_urls: z.boolean().optional(), max_extra_amount_cents: z.number().int().min(0).optional(), confirmed_pairs: z.array(z.object({ old_url: z.string().url().max(8192), new_url: z.string().url().max(8192) })).max(100).optional(), idempotency_key: IDEMPOTENCY },
     annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },
   }, ({ migration_id, old_inventory_id, new_inventory_id, ...args }, extra) => call(extra as ToolExtra, 'POST', `/migrations/${encodeURIComponent(migration_id)}/runs`, { inventory_ids: { old: old_inventory_id, new: new_inventory_id }, ...args }));
 

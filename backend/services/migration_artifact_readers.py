@@ -171,6 +171,14 @@ class MigrationArtifactReaders:
         _, migration = _strict_uuid(migration_id, "migration_id")
         _, run = _strict_uuid(run_id, "run_id")
         run_row = self.repository.get_run(owner, migration, run)
+        if run_row.get("current_billing_usage_id") is not None:
+            authority = self._rpc_json("current_run_export_authority", {
+                "p_user_id": owner, "p_migration_id": migration, "p_run_id": run,
+            })
+            if (authority.get("eligible") is not True or str(authority.get("run_id")) != run
+                    or str(authority.get("usage_id")) != run_row["current_billing_usage_id"]):
+                raise MigrationNotFoundError("Completed current migration authority not found.")
+            return authority
         grant_id = run_row.get("grant_id")
         quote_id = run_row.get("quote_id")
         if not isinstance(quote_id, str):

@@ -10,7 +10,8 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-for (const path of ['/companion', '/migrations/10000000-0000-0000-0000-000000000001?tab=review']) {
+for (const path of ['/companion', '/migrations/10000000-0000-0000-0000-000000000001?tab=review',
+  '/billing/current', '/billing/current/return?checkout_id=70000000-0000-0000-0000-000000000001']) {
   test(`protected deep link retains its destination: ${path}`, async ({ page }) => {
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));

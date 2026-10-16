@@ -1,0 +1,212 @@
+{
+  "status": "live_catalog_applied_application_billing_not_enabled",
+  "account_and_mode": {
+    "account": "acct_1T1fwzReyTnSoYHg",
+    "mode": "live",
+    "verified_date": "2026-10-15",
+    "verification": "Authenticated Stripe dashboard; persisted price detail pages and active product catalog."
+  },
+  "catalog_version": "redirx_2026_10",
+  "products": [
+    {
+      "sku": "payg",
+      "product": {
+        "name": "RedirX Pay as you go",
+        "description": "Pay once for the old URLs in your website move. $0.02 per URL, rounded up to the next whole dollar, with a $10 minimum. Check, edit and download your redirects.",
+        "id": "prod_VRn28fHeo27BPb",
+        "active": true
+      },
+      "price": {
+        "currency": "usd",
+        "unit_amount": 100,
+        "lookup_key": "redirx_2026_10_payg",
+        "tax_behavior": "exclusive",
+        "transform_quantity": {
+          "divide_by": 50,
+          "round": "up"
+        },
+        "id": "price_1UQtSDReyTnSoYHgl5XT6yeK",
+        "active": true,
+        "default": true
+      },
+      "suggested_metadata_not_applied": {
+        "redirx_catalog_version": "redirx_2026_10",
+        "redirx_sku": "payg"
+      }
+    },
+    {
+      "sku": "studio_monthly",
+      "product": {
+        "name": "RedirX Studio",
+        "description": "5,000 old URLs each month, shared across your websites and client projects. Check, edit and download your redirects. Cancel anytime.",
+        "id": "prod_VRmyQILrauV2ru",
+        "active": true
+      },
+      "price": {
+        "currency": "usd",
+        "unit_amount": 7900,
+        "lookup_key": "redirx_2026_10_studio_monthly",
+        "tax_behavior": "exclusive",
+        "recurring": {
+          "interval": "month",
+          "usage_type": "licensed"
+        },
+        "id": "price_1UQtOEReyTnSoYHgA9L17plj",
+        "active": true,
+        "default": true
+      },
+      "suggested_metadata_not_applied": {
+        "redirx_catalog_version": "redirx_2026_10",
+        "redirx_sku": "studio_monthly",
+        "included_old_urls_monthly": "5000"
+      }
+    },
+    {
+      "sku": "agency_monthly",
+      "product": {
+        "name": "RedirX Agency",
+        "description": "15,000 old URLs each month, shared across your websites and client projects. Check, edit and download your redirects. Cancel anytime.",
+        "id": "prod_U8u0k94qbip2sY",
+        "active": true
+      },
+      "price": {
+        "currency": "usd",
+        "unit_amount": 19900,
+        "lookup_key": "redirx_2026_10_agency_monthly",
+        "tax_behavior": "exclusive",
+        "recurring": {
+          "interval": "month",
+          "usage_type": "licensed"
+        },
+        "id": "price_1UQtP1ReyTnSoYHgBoleBYrl",
+        "active": true,
+        "default": true
+      },
+      "suggested_metadata_not_applied": {
+        "redirx_catalog_version": "redirx_2026_10",
+        "redirx_sku": "agency_monthly",
+        "included_old_urls_monthly": "15000"
+      }
+    },
+    {
+      "sku": "additional_urls",
+      "product": {
+        "name": "RedirX Additional URLs",
+        "description": "Old URLs used beyond your monthly plan, only with your approval. $0.02 per extra URL. Your total extra usage for the month is rounded up once to the next whole dollar.",
+        "id": "prod_VRn3DAF4w5ccxm",
+        "active": true
+      },
+      "price": {
+        "currency": "usd",
+        "unit_amount": 100,
+        "lookup_key": "redirx_2026_10_additional_urls",
+        "tax_behavior": "exclusive",
+        "transform_quantity": {
+          "divide_by": 50,
+          "round": "up"
+        },
+        "id": "price_1UQtT5ReyTnSoYHg0ws7GKJr",
+        "active": true,
+        "default": true
+      },
+      "suggested_metadata_not_applied": {
+        "redirx_catalog_version": "redirx_2026_10",
+        "redirx_sku": "additional_urls"
+      }
+    }
+  ],
+  "trial": {
+    "stripe_product_required": false,
+    "old_urls": 500,
+    "frequency": "one separate trial per customer",
+    "enforcement": "Application; not a recurring Stripe credit."
+  },
+  "usage_contract": {
+    "stripe_quantity_unit": "Old URLs, transformed into $1 groups of 50 with round=up.",
+    "payg_quantity": "max(500, newly admitted old URLs); application must enforce the $10 minimum and record actual inventory separately.",
+    "additional_urls_quantity": "Total approved excess old URLs for the subscription period; one consolidated invoice item; omit at zero.",
+    "no_self_serve_customer_quantity_edit": true,
+    "entitlements": "Metadata does not enforce allowances or refinement windows. Application must validate paid entitlement and approved usage.",
+    "examples_usd": {
+      "500": 10,
+      "501": 11,
+      "550": 11,
+      "551": 12,
+      "2500": 50,
+      "2501": 51
+    },
+    "subscription_topup_example": "51 approved extra URLs over the entire month cost $2, not $1 per separate addition."
+  },
+  "cleanup": {
+    "inventory_first": [
+      "Products and all prices",
+      "Subscriptions and subscription schedules",
+      "Payment links",
+      "Configured application price IDs"
+    ],
+    "archive": "Superseded RedirX products/prices only after dependency review; preserve referenced historical records and existing subscription terms.",
+    "never_delete": [
+      "Customers",
+      "Invoices",
+      "Payments",
+      "Subscriptions",
+      "Historical prices"
+    ],
+    "no_changes": [
+      "Account settings",
+      "Tax settings",
+      "Billing portal settings",
+      "Webhook settings",
+      "Existing customer plans",
+      "Deployment flags"
+    ]
+  },
+  "integration_findings": [
+    {
+      "file": "../redirx/backend/services/migration_subscription_service.py",
+      "finding": "Historical test-only code expects Studio $99 and monitoring $29."
+    },
+    {
+      "file": "../redirx/backend/services/migration_subscription_checkout_service.py",
+      "finding": "Historical checkout validates old amounts and active configured prices; catalog edits alone will not activate new model."
+    },
+    {
+      "file": "../redirx/database/migrations/042_subscription_allowances.sql",
+      "finding": "Applied historical schema restricts subscription amounts to 9900/2900 cents. Do not rewrite historical migration."
+    },
+    {
+      "file": "../redirx/CLAUDE.md",
+      "finding": "Current guide pins free 500-old/2000-new URL path and says deferred billing migrations must remain disabled."
+    }
+  ],
+  "references": [
+    "https://docs.stripe.com/api/prices/create",
+    "https://docs.stripe.com/products-prices/manage-prices"
+  ],
+  "applied_cleanup": {
+    "archived_products": [
+      "prod_U8u0rhUNbdidMg"
+    ],
+    "founder_historical_price_retained": "price_1TAcC5ReyTnSoYHgGc1I1vSh",
+    "archived_agency_prices": [
+      "price_1TAcC6ReyTnSoYHgZcZpHte9",
+      "price_1TAcC5ReyTnSoYHgiWT77lnC",
+      "price_1TAcC4ReyTnSoYHgTmhqqgzW"
+    ],
+    "agency_product_reused": true,
+    "prechange_dependencies": "Subscription pages showed no subscriptions; payment links page showed no links; old Agency price rows each showed 0 active subscriptions.",
+    "records_deleted": false,
+    "account_settings_changed": false
+  },
+  "verification": {
+    "active_product_count": 4,
+    "stripe_preview_examples": {
+      "payg_501_urls_usd": 11,
+      "additional_51_urls_usd": 2
+    },
+    "package_price_readback": "Both one-time usage prices show $1 per group of 50, round up to nearest complete package, exclusive tax, and correct lookup keys.",
+    "studio_readback": "$79/month, correct lookup key, exclusive tax, default.",
+    "agency_readback": "$199/month default; all three older prices show Archived.",
+    "not_tested": "No checkout purchase, payment, webhook, entitlement or end-to-end billing test performed. Catalog changes do not enable application billing."
+  }
+}

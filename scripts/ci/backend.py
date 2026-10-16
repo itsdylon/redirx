@@ -16,6 +16,10 @@ sys.path.insert(0, str(ROOT))
 # Deliberately select product boundaries, not the current matching implementation.
 # Keep this list explicit: broad discovery also collects live/provider/capacity tests.
 MODULES = (
+    "test_current_billing_service",
+    "test_current_billing_routes",
+    "test_current_billing_settlement",
+    "test_current_paid_admission.CurrentAdmissionGates",
     "test_auth_service_isolation",
     "test_mcp_delegation_service",
     "test_companion_auth",

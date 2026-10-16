@@ -48,6 +48,9 @@ def create_migration_checkout_blueprint(service_factory=MigrationCheckoutService
     @authenticated
     @limiter.limit('30 per minute', key_func=account_limit_key)
     def create_checkout(migration_id, quote_id):
+        from backend.services.current_billing_service import enabled
+        if enabled():
+            return failure('operation_conflict', 'Use current billing for new purchases.', 409)
         value = body({'operation_id', 'idempotency_key'})
         service = service_factory()
         return present(service, request.api_user_id, service.create_checkout(request.api_user_id,
@@ -74,6 +77,9 @@ def create_migration_checkout_blueprint(service_factory=MigrationCheckoutService
     @authenticated
     @limiter.limit('15 per minute', key_func=account_limit_key)
     def create_subscription_checkout():
+        from backend.services.current_billing_service import enabled
+        if enabled():
+            return failure('operation_conflict', 'Use current billing for new monthly plans.', 409)
         value = body({'sku', 'deployment_id', 'idempotency_key', 'recurring_consent'})
         return subscription_response(subscription_service_factory().create_checkout(request.api_user_id,
             value.get('sku'), value.get('idempotency_key'), recurring_consent=value.get('recurring_consent'),
