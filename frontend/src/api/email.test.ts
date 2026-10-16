@@ -150,7 +150,7 @@ describe('updateEmailPreference', () => {
     );
 
     await expect(
-      updateEmailPreference('invalid_type', true)
+      updateEmailPreference('mapping_complete', true)
     ).rejects.toThrow('Invalid email type');
   });
 
@@ -161,4 +161,14 @@ describe('updateEmailPreference', () => {
       updateEmailPreference('mapping_complete', true)
     ).rejects.toThrow('Failed to update email preference');
   });
+});
+
+
+it.each([{}, { preferences: null }, { preferences: [{ email_type: 'watch_alert', opted_out: 'false' }] }])('rejects unknown preference reads %s', async response => {
+  mockFetch.mockReturnValueOnce(jsonResponse(response));
+  await expect(getEmailPreferences()).rejects.toThrow('could not be verified');
+});
+it.each([{}, { success: false }])('requires positive preference write acknowledgment %s', async response => {
+  mockFetch.mockReturnValueOnce(jsonResponse(response));
+  await expect(updateEmailPreference('watch_alert', true)).rejects.toThrow('not confirmed');
 });

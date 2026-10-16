@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import os
 from uuid import UUID
 
-from .migration_repository import MigrationRepository, MigrationNotFoundError, _strict_uuid
+from .migration_repository import MigrationRepository, MigrationNotFoundError, RepositoryUnavailableError, InvalidInputError, _strict_uuid, _rows
 from .migration_planning_service import MigrationPlanningService, envelope
 from .migration_verification_service import MigrationVerificationService
 from .migration_monitoring_service import MigrationMonitoringService
@@ -24,11 +24,39 @@ class MigrationStatusService:
         self.repository = repository
 
     def _one(self, table, columns, owner, migration=None, **filters):
-        query = self.repository.client.table(table).select(columns).eq('user_id', owner)
-        if migration is not None: query = query.eq('migration_id', migration)
-        for key, value in filters.items(): query = query.eq(key, str(value))
-        rows = self.repository._execute(query.order('created_at', desc=True).order('id', desc=True).limit(1)).data
-        return {key: rows[0].get(key) for key in columns.split(',')} if rows else None
+        # The projection is an acknowledgment, including explicit nullable fields.
+        # Select scope columns too so a malformed/misrouted row cannot describe
+        # a different owner, migration or requested child. Never return them just
+        # because validation needed them.
+        projected = columns.split(',')
+        scope = {'user_id': owner}
+        if migration is not None: scope['migration_id'] = migration
+        scope.update(filters)
+        selected = list(dict.fromkeys([*projected, *scope]))
+        query = self.repository.client.table(table).select(','.join(selected))
+        for key, value in scope.items(): query = query.eq(key, str(value))
+        rows = _rows(self.repository._execute(query.order('created_at', desc=True).order('id', desc=True).limit(1)))
+        if not rows: return None
+        if len(rows) != 1 or any(key not in rows[0] for key in selected):
+            raise RepositoryUnavailableError('Migration status is temporarily unavailable.')
+        row = rows[0]
+        try:
+            # Nullable historical links remain null; supplied links must be UUIDs
+            # before they can be used in another lookup or published as a route.
+            _strict_uuid(row['id'], 'id')
+            for key in selected:
+                if (key.endswith('_id') or key == 'rerun_of') and row[key] is not None:
+                    _strict_uuid(row[key], key)
+            for key, expected in scope.items():
+                if key == 'id' or key.endswith('_id'):
+                    matches = _strict_uuid(row[key], key)[0] == _strict_uuid(expected, key)[0]
+                else:
+                    matches = row[key] == expected
+                if not matches:
+                    raise RepositoryUnavailableError('Migration status is temporarily unavailable.')
+        except InvalidInputError:
+            raise RepositoryUnavailableError('Migration status is temporarily unavailable.') from None
+        return {key: row[key] for key in projected}
 
     def get(self, user_id, migration_id, *, run_id=None, base_summary=None):
         """Pass root's discovery summary as base_summary to retain its progress.

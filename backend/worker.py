@@ -473,67 +473,107 @@ class RedirxWorker:
         )
         return job
 
-    async def extend_lease(self, session_id: UUID) -> bool:
-        """
-        Extend the lease for a running job.
+    @staticmethod
+    def _session_update_acknowledged(result, session_id, attempt_count, expected):
+        """A returned representation proves this exact update, not a zero-row no-op."""
+        if getattr(result, 'error', None):
+            return False
+        rows = getattr(result, 'data', None)
+        if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+            return False
+        row = rows[0]
+        if (str(row.get('id')) != str(session_id)
+                or type(row.get('attempt_count')) is not int or row['attempt_count'] != attempt_count):
+            return False
+        for key, value in expected.items():
+            if key not in row:
+                return False
+            if key in {'completed_at', 'lease_expires_at'} and value is not None:
+                try:
+                    actual = datetime.fromisoformat(str(row[key]).replace('Z', '+00:00'))
+                    if actual != datetime.fromisoformat(value):
+                        return False
+                except (TypeError, ValueError):
+                    return False
+            elif row[key] != value:
+                return False
+        return True
 
-        Args:
-            session_id: Session ID to extend lease for.
+    async def extend_lease(self, session_id: UUID, *, attempt_count: int) -> bool:
+        """Renew only this processing attempt; an empty response is not success.
 
-        Returns:
-            True if lease extended successfully.
+        The expiry predicate uses a client-clock snapshot, not database now().
+        Pivot dispatch/finalization RPCs retain their independent SQL clock guard.
         """
+        if type(attempt_count) is not int or attempt_count < 1:
+            return False
         try:
             client = SupabaseClient.get_client()
-            new_expiry = (datetime.now(timezone.utc) + timedelta(seconds=WORKER_LEASE_DURATION)).isoformat()
-
-            client.table('migration_sessions').update({
-                'lease_expires_at': new_expiry
-            }).eq('id', str(session_id)).eq('locked_by', self.worker_id).execute()
-
-            print(f"[Worker] Extended lease for job {session_id}")
-            return True
-
-        except Exception as e:
-            print(f"[Worker] Error extending lease: {e}")
+            now = datetime.now(timezone.utc)
+            expiry = (now + timedelta(seconds=WORKER_LEASE_DURATION)).isoformat()
+            result = client.table('migration_sessions').update({
+                'lease_expires_at': expiry
+            }).eq('id', str(session_id)).eq('locked_by', self.worker_id).eq(
+                'attempt_count', attempt_count
+            ).eq('status', 'processing').gt('lease_expires_at', now.isoformat()).execute()
+            confirmed = self._session_update_acknowledged(result, session_id, attempt_count, {
+                'lease_expires_at': expiry, 'locked_by': self.worker_id, 'status': 'processing',
+            })
+            if confirmed:
+                print(f"[Worker] Extended lease for job {session_id}")
+            else:
+                print(f"[Worker] Lease extension not confirmed for job {session_id}")
+            return confirmed
+        except Exception:
+            print(f"[Worker] Lease extension not confirmed for job {session_id}")
             return False
 
-    async def release_lease(self, session_id: UUID, status: str, error_message: Optional[str] = None) -> None:
-        """
-        Release the lease and update job status.
+    async def release_lease(self, session_id: UUID, status: str, error_message: Optional[str] = None,
+                            *, attempt_count: int) -> bool:
+        """Finalize only an owned historical attempt, with a positive row receipt.
 
-        Args:
-            session_id: Session ID to release.
-            status: Final status ('completed', 'pending', 'permanently_failed').
-            error_message: Optional error message.
+        An absent row, lost lease or unknown response returns False. Never retry
+        this mutation or infer rollback; normal durable lease recovery remains.
         """
+        if type(attempt_count) is not int or attempt_count < 1:
+            return False
         try:
             client = SupabaseClient.get_client()
-
-            updates = {
-                'status': status,
-                'locked_at': None,
-                'locked_by': None,
-                'lease_expires_at': None
-            }
-
-            # Stamp completion only for terminal states. Releasing back to
-            # 'pending' is a retry, and marking that complete would report a
-            # duration for a run that never finished.
+            now = datetime.now(timezone.utc)
+            updates = {'status': status, 'locked_at': None, 'locked_by': None, 'lease_expires_at': None}
             if status in TERMINAL_JOB_STATUSES:
-                updates['completed_at'] = datetime.now(timezone.utc).isoformat()
-
+                updates['completed_at'] = now.isoformat()
             if error_message:
                 updates['last_error'] = error_message[:5000]
-
-            client.table('migration_sessions').update(updates).eq(
+            result = client.table('migration_sessions').update(updates).eq(
                 'id', str(session_id)
-            ).execute()
+            ).eq('locked_by', self.worker_id).eq('attempt_count', attempt_count).eq(
+                'status', 'processing'
+            ).is_('mcp_run_id', 'null').gt('lease_expires_at', now.isoformat()).execute()
+            confirmed = self._session_update_acknowledged(result, session_id, attempt_count, updates)
+            if confirmed:
+                print(f"[Worker] Released lease for job {session_id}, status: {status}")
+            else:
+                print(f"[Worker] Finalization not confirmed for job {session_id}")
+            return confirmed
+        except Exception:
+            print(f"[Worker] Finalization not confirmed for job {session_id}")
+            return False
 
-            print(f"[Worker] Released lease for job {session_id}, status: {status}")
+    def _notification_parent_current(self, job, status):
+        """Suppress a late notification when its owned parent is already gone.
 
-        except Exception as e:
-            print(f"[Worker] Error releasing lease: {e}")
+        This is a last read before external delivery, not atomic revocation of
+        an email already being accepted by a provider.
+        """
+        try:
+            row = self.session_db.get_session(UUID(job['id']))
+            return (isinstance(row, dict) and str(row.get('id')) == str(job['id'])
+                    and row.get('user_id') == job.get('user_id')
+                    and row.get('status') == status
+                    and row.get('attempt_count') == job.get('attempt_count', 1))
+        except Exception:
+            return False
 
     async def process_job(self, job: Dict[str, Any]) -> bool:
         """
@@ -553,11 +593,23 @@ class RedirxWorker:
         pivot_migration_id = None
         jev_job = False
 
+        def report_progress(progress_session_id, current_stage, stage_name, total_stages):
+            # Never fall back to unfenced progress for malformed/missing claim context.
+            return self.session_db.update_session_progress_for_attempt(
+                progress_session_id, current_stage, stage_name, total_stages,
+                worker_id=self.worker_id, attempt_count=job.get('attempt_count'))
+
         async def finish(status, error=None):
             if pivot_service is not None:
-                pivot_service.finalize_session(job, self.worker_id, status, error)
-            else:
-                await self.release_lease(session_id, status, error)
+                result = pivot_service.finalize_session(job, self.worker_id, status, error)
+                # Terminal RPC replay reports observed durable state, which may
+                # belong to a newer attempt with a different outcome.
+                expected = {'completed': 'succeeded', 'pending': 'queued', 'permanently_failed': 'failed'}
+                confirmed = isinstance(result, dict) and result.get('status') == expected.get(status)
+                if not confirmed:
+                    print(f"[Worker] Requested pivot outcome not confirmed for job {session_id}")
+                return confirmed
+            return await self.release_lease(session_id, status, error, attempt_count=attempt_count)
 
         print(
             f"[Worker] Processing job {session_id} (attempt {attempt_count}, "
@@ -566,9 +618,17 @@ class RedirxWorker:
         )
 
         # Start lease extension task
-        lease_extension_task = asyncio.create_task(self._lease_extension_loop(session_id))
+        lease_extension_task = asyncio.create_task(self._lease_extension_loop(session_id, attempt_count=attempt_count))
         preview_service = DeepPreviewService()
         resource_reservations = ExitStack()
+
+        def mark_preview_failed(error):
+            # Call only after an acknowledged transition of this attempt.
+            if is_preview:
+                try:
+                    preview_service.mark_failed(session_id, error)
+                except Exception:
+                    print(f"[Worker] Failed to persist preview failure status for {session_id}")
 
         try:
             if pivot_service is not None:
@@ -586,8 +646,9 @@ class RedirxWorker:
                     from backend.services.jev_runner import JevPipelineRunner
                     from backend.services.jev_database_transport import jev_worker_database
                     with jev_worker_database() as jev_client:
-                        await JevPipelineRunner(jev_client).run(job,self.worker_id,self.session_db.update_session_progress)
-                    await finish('completed')
+                        await JevPipelineRunner(jev_client).run(job,self.worker_id,report_progress)
+                    if not await finish('completed'):
+                        return False
                     self.jobs_processed += 1
                     return True
 
@@ -597,9 +658,8 @@ class RedirxWorker:
 
             if not old_urls or not new_urls:
                 print(f"[Worker] Job {session_id} has no URLs")
-                if is_preview:
-                    preview_service.mark_failed(session_id, 'No URLs provided')
-                await finish('permanently_failed', 'No URLs provided')
+                if await finish('permanently_failed', 'No URLs provided'):
+                    mark_preview_failed('No URLs provided')
                 return False
 
             try:
@@ -607,9 +667,8 @@ class RedirxWorker:
             except ContentJobUrlCapExceeded as cap_error:
                 fail_message = cap_error.to_worker_error_message()
                 print(f"[Worker] Job {session_id} rejected before processing: {fail_message}")
-                if is_preview:
-                    preview_service.mark_failed(session_id, fail_message)
-                await finish('permanently_failed', fail_message)
+                if await finish('permanently_failed', fail_message):
+                    mark_preview_failed(fail_message)
                 return False
 
             print(f"[Worker] Processing {len(old_urls)} old URLs and {len(new_urls)} new URLs (pipeline: {pipeline_type})")
@@ -640,7 +699,7 @@ class RedirxWorker:
 
             # Report first stage starting (progress fields were reset to NULL when job was claimed)
             print(f"[Worker] Initial progress report: stage 1/{total}, name={names[0]}", flush=True)
-            self.session_db.update_session_progress(session_id, 1, names[0], total)
+            report_progress(session_id, 1, names[0], total)
 
             final_state = None
             async for step in pipeline.iterate():
@@ -648,7 +707,7 @@ class RedirxWorker:
                 print(f"[Worker] After iteration: completed={completed}, total={total}", flush=True)
                 if completed < total:
                     print(f"[Worker] Reporting progress: stage {completed + 1}/{total}, name={names[completed]}", flush=True)
-                    self.session_db.update_session_progress(session_id, completed + 1, names[completed], total)
+                    report_progress(session_id, completed + 1, names[completed], total)
                 else:
                     print(f"[Worker] Skipping progress report (completed={completed} >= total={total})", flush=True)
                 final_state = step
@@ -660,16 +719,6 @@ class RedirxWorker:
                 mapping_db = URLMappingDB()
                 mappings = mapping_db.get_mappings_by_session(session_id)
                 mapping_count = len(mappings or [])
-
-                if pivot_service is None:
-                    self._apply_usage_accounting(
-                        user_id=user_id,
-                        session_id=session_id,
-                        pipeline_type=pipeline_type,
-                        is_preview=is_preview,
-                        old_urls=old_urls,
-                        new_urls=new_urls,
-                    )
 
             # Propose repairs for the rows the matcher flagged, using the
             # rename conventions this session's own confident matches
@@ -692,6 +741,20 @@ class RedirxWorker:
                         flush=True,
                     )
 
+            # Do not publish completion side effects from a deleted/stale job
+            # or from an update whose commit could not be confirmed.
+            if not await finish('completed'):
+                return False
+            print(f"[Worker] Job {session_id} completed successfully")
+            if pivot_service is None:
+                try:
+                    self._apply_usage_accounting(
+                        user_id=user_id, session_id=session_id, pipeline_type=pipeline_type,
+                        is_preview=is_preview, old_urls=old_urls, new_urls=new_urls,
+                    )
+                except Exception:
+                    print(f"[Worker] Post-completion accounting unavailable for job {session_id}")
+
             # Queue preview job after successful source url_only completion.
             if (not is_preview) and pipeline_type == 'url_only' and user_id:
                 try:
@@ -712,11 +775,10 @@ class RedirxWorker:
                     print(f"[Worker] Deep preview finalize result for {session_id}: {finalize_result}")
                 except Exception as preview_err:
                     print(f"[Worker] Failed to finalize deep preview for {session_id}: {preview_err}")
-                    preview_service.mark_failed(session_id, str(preview_err))
-
-            # Success - release lease and mark completed
-            await finish('completed')
-            print(f"[Worker] Job {session_id} completed successfully")
+                    try:
+                        preview_service.mark_failed(session_id, str(preview_err))
+                    except Exception:
+                        print(f"[Worker] Preview failure status unavailable for job {session_id}")
 
             # Send completion email (fire-and-forget)
             if not is_preview:
@@ -727,7 +789,7 @@ class RedirxWorker:
                         profile = client.table('user_profiles').select(
                             'email'
                         ).eq('id', user_id).maybe_single().execute()
-                        if profile.data and profile.data.get('email'):
+                        if profile.data and profile.data.get('email') and self._notification_parent_current(job, 'completed'):
                             project_name = job.get('project_name', 'Migration')
                             old_domain = ""
                             new_domain = ""
@@ -773,12 +835,6 @@ class RedirxWorker:
             print(f"[Worker] Job {session_id} failed: {e}")
             traceback.print_exc()
 
-            if is_preview:
-                try:
-                    preview_service.mark_failed(session_id, str(e))
-                except Exception:
-                    print(f"[Worker] Failed to persist preview failure status for {session_id}")
-
             # Check if we should retry or permanently fail
             if attempt_count >= WORKER_MAX_ATTEMPTS:
                 print(f"[Worker] Job {session_id} exceeded max attempts, marking as permanently failed")
@@ -787,7 +843,9 @@ class RedirxWorker:
                     # classification uses the original exception, never its text.
                     MigrationSubscriptionService().finalize_worker_failure(job, self.worker_id, e)
                 else:
-                    await finish('permanently_failed', error_msg)
+                    if not await finish('permanently_failed', error_msg):
+                        return False
+                mark_preview_failed(str(e))
 
                 # Send failure email (fire-and-forget)
                 if not is_preview:
@@ -799,7 +857,7 @@ class RedirxWorker:
                             profile = client.table('user_profiles').select(
                                 'email'
                             ).eq('id', user_id).maybe_single().execute()
-                            if profile.data and profile.data.get('email'):
+                            if profile.data and profile.data.get('email') and self._notification_parent_current(job, 'permanently_failed'):
                                 project_name = job.get('project_name', 'Migration')
                                 email_svc = EmailService()
                                 email_svc.send_mapping_failed(
@@ -813,8 +871,9 @@ class RedirxWorker:
                     except Exception:
                         print(f"[Worker] Failure email failed (non-blocking)")
             else:
-                print(f"[Worker] Job {session_id} will be retried")
-                await finish('pending', error_msg)
+                if await finish('pending', error_msg):
+                    print(f"[Worker] Job {session_id} queued for retry")
+                    mark_preview_failed(str(e))
 
             return False
 
@@ -827,33 +886,19 @@ class RedirxWorker:
             except asyncio.CancelledError:
                 pass
 
-    async def _lease_extension_loop(self, session_id: UUID) -> None:
-        """
-        Background task to extend lease periodically.
+    async def _lease_extension_loop(self, session_id: UUID, *, attempt_count: int) -> None:
+        """Renew before expiry, stopping on a lost or unconfirmed attempt.
 
-        Args:
-            session_id: Session ID to extend lease for.
+        One atomic renewal replaces the old read-then-update heartbeat. The old
+        300s poll / 120s threshold reached the 600s default expiry before renewal.
+        This loop does not cancel an already running legacy pipeline.
         """
+        interval = max(1.0, min(300.0, WORKER_LEASE_DURATION / 3))
         try:
             while True:
-                # Check every 5 minutes, extend if < 2 minutes remaining
-                await asyncio.sleep(300)  # 5 minutes
-
-                # Check current lease expiry
-                try:
-                    session = self.session_db.get_session(session_id)
-                    lease_expires_at = session.get('lease_expires_at')
-
-                    if lease_expires_at:
-                        expiry_time = datetime.fromisoformat(lease_expires_at.replace('Z', '+00:00'))
-                        time_remaining = (expiry_time - datetime.now(timezone.utc)).total_seconds()
-
-                        if time_remaining < 120:  # Less than 2 minutes
-                            await self.extend_lease(session_id)
-
-                except Exception as e:
-                    print(f"[Worker] Error checking lease expiry: {e}")
-
+                await asyncio.sleep(interval)
+                if not await self.extend_lease(session_id, attempt_count=attempt_count):
+                    return
         except asyncio.CancelledError:
             pass
 
@@ -1048,10 +1093,18 @@ class RedirxWorker:
         print(f"[Worker] Poll interval: {WORKER_FALLBACK_INTERVAL} seconds")
 
         self.running = True
+        next_reclaim_at = time.monotonic()
+        reclaim_interval = max(1.0, float(WORKER_FALLBACK_INTERVAL))
 
         try:
             while self.running:
                 await self._reap_finished_jobs(wait_for_one=False)
+                if time.monotonic() >= next_reclaim_at:
+                    # Polling is also the recovery path when LISTEN is unavailable.
+                    # Pending-only claims cannot see abandoned processing leases.
+                    # An uncertain reclaim is not retried here; wait a full tick.
+                    await self.reclaim_expired_leases()
+                    next_reclaim_at = time.monotonic() + reclaim_interval
                 await self._watch_tick()
                 claimed = await self._dispatch_until_capacity("polling loop")
 

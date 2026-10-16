@@ -46,11 +46,14 @@ def _send_welcome_if_needed(
         from backend.services.email_service import EmailService
         email_service = EmailService()
         user_name = profile_data.get('full_name', '')
-        email_service.send_welcome(
+        message_id = email_service.send_welcome(
             user_id=user_id,
             to_email=user_email,
             user_name=user_name,
         )
+        from backend.services.email_service import accepted_message_id
+        if accepted_message_id({'id': message_id}) is None:
+            return
         client.table('user_profiles').update(
             {'welcome_email_sent': True}
         ).eq('id', user_id).execute()

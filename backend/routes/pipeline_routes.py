@@ -1,13 +1,15 @@
 from flask import Blueprint, Response, request, jsonify
 import os
+import math
 from uuid import UUID
 import numpy as np
 from backend.services.pipeline_runner import run_pipeline, read_csv
-from backend.services.results_formatter import format_results_response, calculate_path_similarity
+from backend.services.results_formatter import format_results_response, calculate_path_similarity, calculate_confidence_band
 from backend.services.auth_service import require_auth
 from backend.services.deep_preview_service import DeepPreviewService
 from backend.services.pricing_service import PricingService
 from backend.services import entitlement_service, redirect_export
+from backend.services.inventory_policy import InventoryPolicyError, MAX_URL_LENGTH, normalize_origin
 from backend.services.job_limits import (
     ContentJobUrlCapExceeded,
     validate_content_job_url_counts,
@@ -336,8 +338,10 @@ def export_results(session_id: str):
 
     Viewing results is free; this is the Pricing V3 gate. `?format=` one of
     apache|nginx|wordpress|vercel|cloudflare|shopify|csv|json, `?url_format=`
-    paths|full (paths by default). Mirrors v1_routes.export_migration —
-    same entitlement check, same redirect_export module, different auth.
+    paths|full|custom (paths by default). Optional confidence_levels selects
+    display bands; preview=true returns the same rendered bytes and exclusions
+    without recording an export. Ownership and entitlement gate both modes.
+    Mirrors v1_routes.export_migration through the same redirect_export module.
     """
     try:
         session_uuid = UUID(session_id)
@@ -381,29 +385,70 @@ def export_results(session_id: str):
         }), 400
 
     url_format = (request.args.get("url_format") or "paths").lower()
-    if url_format not in ("paths", "full"):
-        return jsonify({"success": False, "error": "'url_format' must be 'paths' or 'full'."}), 400
+    if url_format not in ("paths", "full", "custom"):
+        return jsonify({"success": False, "error": "'url_format' must be 'paths', 'full', or 'custom'."}), 400
+
+    domains = {}
+    for name in ("old_domain", "new_domain"):
+        value = request.args.get(name) or None
+        if value:
+            try:
+                # Validate against the shared origin policy, but keep the supplied
+                # spelling for export. URL suffixes remain the renderer's raw input.
+                normalize_origin(value)
+            except InventoryPolicyError:
+                return jsonify({"success": False, "error": f"'{name}' must be an http(s) origin without credentials, path, query or fragment."}), 400
+        domains[name] = value if url_format == "custom" else None
+    if url_format == "custom" and not any(domains.values()):
+        return jsonify({"success": False, "error": "Custom domains require an old or new origin."}), 400
 
     try:
         min_confidence = float(request.args.get("min_confidence", 0))
+        if not math.isfinite(min_confidence):
+            raise ValueError()
     except ValueError:
-        return jsonify({"success": False, "error": "'min_confidence' must be a number."}), 400
+        return jsonify({"success": False, "error": "'min_confidence' must be a finite number."}), 400
+    levels = None
+    if "confidence_levels" in request.args:
+        levels = set(request.args["confidence_levels"].split(","))
+        if not levels or not levels.issubset({"high", "medium", "low"}):
+            return jsonify({"success": False, "error": "'confidence_levels' must contain high, medium or low, separated by commas."}), 400
 
     rows = [
-        r for r in URLMappingDB().get_mappings_by_session(session_uuid)
-        if (r.get("confidence_score") or 0) >= min_confidence
+        row for row in URLMappingDB().get_mappings_by_session(session_uuid)
+        if (row.get("confidence_score") or 0) >= min_confidence
+        and (levels is None or calculate_confidence_band(row.get("confidence_score") or 0) in levels)
     ]
-
-    content = redirect_export.build_export(rows, fmt, url_format=url_format)
+    try:
+        selection = redirect_export.select_export_mappings(rows, url_format=url_format, **domains)
+        content = redirect_export.build_export(rows, fmt, url_format=url_format, **domains)
+    except redirect_export.ExportSelectionError as error:
+        return jsonify({"success": False, "code": "unsupported_export_input", "error": str(error),
+                        "user_message": str(error), "retryable": False,
+                        "next_action": "review_export_options"}), 422
     warning = redirect_export.warning_for(fmt, url_format)
+    if request.args.get("preview", "").lower() == "true":
+        response = jsonify({
+            "success": True, "content": content,
+            "filename": redirect_export.filename_for(fmt),
+            "content_type": redirect_export.content_type_for(fmt),
+            "included_count": selection["included_count"],
+            "excluded_count": selection["excluded_count"],
+            "excluded": [{"mapping_id": str(rows[item["index"]].get("id")) if rows[item["index"]].get("id") else None,
+                          "reason": item["reason"]} for item in selection["excluded"]],
+            "warning": warning,
+        })
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
 
     entitlement_service.record_export(user_id, session_uuid)
-
     response = Response(content, mimetype=redirect_export.content_type_for(fmt))
     response.headers["Content-Disposition"] = (
         f'attachment; filename="{redirect_export.filename_for(fmt)}"'
     )
-    response.headers["X-Redirect-Count"] = str(len(rows))
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Redirect-Count"] = str(selection["included_count"])
+    response.headers["X-Redirect-Excluded-Count"] = str(selection["excluded_count"])
     if warning:
         response.headers["X-Redirx-Warning"] = warning
     return response
@@ -770,12 +815,13 @@ def update_mapping(session_id: str, mapping_id: str):
     deployed fixes), and the v1 export could disagree with the file the browser
     built. Review decisions are product data, not UI state.
 
-    Accepts a partial body; only these fields, all optional:
+    Accepts a partial body. Target/approval writes also require expected_new_url:
       approved     bool   -> stored as needs_review = not approved
       new_url      str    -> the reviewed target (edit or accepted repair)
       match_type   str    -> e.g. 'manual', 'rule_repaired'
       confidence   float  -> 0..1
       clear_repair bool   -> drop any pending repair proposal
+      expected_new_url str | null -> exact saved target before any decision/target write
     """
     try:
         session_uuid = UUID(session_id)
@@ -802,7 +848,26 @@ def update_mapping(session_id: str, mapping_id: str):
     if not mapping or str(mapping.get('session_id')) != str(session_uuid):
         return jsonify({"success": False, "error": "Mapping not found."}), 404
 
-    body = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({'success': False, 'error': 'Review decision must be a JSON object.'}), 400
+    target_bound = 'approved' in body or 'new_url' in body
+    if target_bound and 'expected_new_url' not in body:
+        return jsonify({
+            "success": False, "code": "review_target_precondition_required",
+            "error": "Reload the review page before saving. The exact previously reviewed target is required.",
+            "retryable": False, "next_action": "reload_results",
+        }), 409
+    expected_target = body.get('expected_new_url')
+    if target_bound:
+        if expected_target is not None and (not isinstance(expected_target, str) or len(expected_target) > MAX_URL_LENGTH):
+            return jsonify({"success": False, "error": "'expected_new_url' must be a URL string or null."}), 400
+        if expected_target != mapping.get('new_url'):
+            return jsonify({
+                "success": False, "code": "review_target_conflict",
+                "error": "The saved target changed. Reload results and review the current target before saving.",
+                "retryable": False, "next_action": "reload_results",
+            }), 409
     updates = {}
 
     if 'approved' in body:
@@ -815,6 +880,10 @@ def update_mapping(session_id: str, mapping_id: str):
         if not isinstance(new_url, str) or not new_url.strip() or len(new_url) > 2048:
             return jsonify({"success": False, "error": "'new_url' must be a non-empty URL."}), 400
         updates['new_url'] = new_url.strip()
+        # Approval is about this target, not merely the source row. Historical
+        # callers may omit approved; changing a target then requires review.
+        if updates['new_url'] != mapping.get('new_url') and 'approved' not in body:
+            updates['needs_review'] = True
 
     if 'match_type' in body:
         match_type = body['match_type']
@@ -843,14 +912,43 @@ def update_mapping(session_id: str, mapping_id: str):
     if not updates:
         return jsonify({"success": False, "error": "Nothing to update."}), 400
 
-    try:
-        mapping_db.client.table('url_mappings').update(updates).eq(
-            'id', str(mapping_uuid)
-        ).execute()
-    except Exception as e:
+    def unconfirmed(status):
         return jsonify({
             "success": False,
-            "error": f"Failed to save review decision: {str(e)}"
-        }), 500
+            "code": "review_save_unconfirmed",
+            "error": "Review save was not confirmed. Reload results to check the server state before exporting.",
+            "retryable": False,
+            "next_action": "reload_results",
+        }), status
+
+    try:
+        # url_mappings has no owner column. Bind the mutation to the session
+        # whose owner was checked above, as well as the mapping ID.
+        mutation = mapping_db.client.table('url_mappings').update(updates).eq(
+            'id', str(mapping_uuid)
+        ).eq('session_id', str(session_uuid))
+        if target_bound:
+            # Atomic comparison: another tab can change the target after our
+            # read. Null and the empty string remain distinct stored identities.
+            mutation = (mutation.is_('new_url', 'null') if expected_target is None
+                        else mutation.eq('new_url', expected_target))
+        result = mutation.execute()
+    except Exception:
+        # The write might have committed before the response failed. Never
+        # imply rollback or expose database detail; require readback.
+        return unconfirmed(503)
+    if getattr(result, 'error', None):
+        return unconfirmed(503)
+    rows = getattr(result, 'data', None)
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        return unconfirmed(409)
+    saved = rows[0]
+    if (str(saved.get('id')) != str(mapping_uuid)
+            or str(saved.get('session_id')) != str(session_uuid)
+            or (target_bound and ('new_url' not in saved or saved['new_url'] != updates.get('new_url', expected_target)))
+            or any(key not in saved or saved[key] != value
+                   or (isinstance(value, bool) and not isinstance(saved[key], bool))
+                   for key, value in updates.items())):
+        return unconfirmed(409)
 
     return jsonify({"success": True}), 200

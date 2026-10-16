@@ -44,15 +44,18 @@ export interface DiscoveryResponse {
 export async function discoverSite(
   url: string,
   side: 'old' | 'new' = 'old',
-  gscProperty?: string
+  gscProperty?: string | null,
+  signal?: AbortSignal
 ): Promise<DiscoveryResponse> {
   try {
     const response = await fetch(`${API_BASE_URL}/api/discovery/discover`, {
       method: 'POST',
       headers: getAuthHeaders(),
+      signal,
       // The old side leads with Search Console; the new site isn't indexed yet.
       body: JSON.stringify(
-        gscProperty ? { url, side, gsc_property: gscProperty } : { url, side }
+        gscProperty === null ? { url, side, use_gsc: false }
+          : gscProperty ? { url, side, gsc_property: gscProperty } : { url, side }
       ),
     });
 
@@ -71,7 +74,8 @@ export async function discoverSite(
 
     return await response.json();
   } catch (error: any) {
-    if (error instanceof TypeError || error.name === 'AbortError') {
+    if (error.name === 'AbortError') throw error;
+    if (error instanceof TypeError) {
       const userError = await handleApiError(error);
       throw new Error(userError.message);
     }

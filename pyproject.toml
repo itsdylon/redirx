@@ -2,7 +2,7 @@
 name = "redirx"
 version = "0.1.0"
 dependencies = [
-  "aiohttp==3.13.2",
+  "aiohttp==3.14.3",
   "supabase>=2.24.0",
   "python-dotenv==1.0.0",
   "openai>=1.50.0,<2.0.0",

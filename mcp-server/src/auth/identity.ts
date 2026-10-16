@@ -16,6 +16,26 @@ interface CacheEntry {
 const cache = new Map<string, CacheEntry>();
 const inflight = new Map<string, Promise<ResolvedIdentity>>();
 const EXPIRY_SKEW_MS = 5_000;
+export const IDENTITY_REQUEST_TIMEOUT_MS = 10_000;
+
+async function identityJson(path: string, init: RequestInit): Promise<Record<string, unknown>> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), IDENTITY_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${config.backendBaseUrl}${path}`, { ...init, signal: controller.signal });
+    if (!response.ok) throw new Error(`Identity resolution failed (${response.status}). Please retry the connection.`);
+    const body: unknown = await response.json();
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Invalid identity response.');
+    return body as Record<string, unknown>;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('Identity resolution timed out. Please retry the connection.');
+    // Never include upstream response bodies, URLs or transport exception text.
+    if (error instanceof Error && /^Identity resolution failed \(\d+\)\./.test(error.message)) throw error;
+    throw new Error('Identity resolution is unavailable. Please retry the connection.');
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Turn a verified identity into `{userId, apiKey, plan}` — the thing every
@@ -71,27 +91,18 @@ interface ResolutionWithCache {
 }
 
 async function resolveViaBackend(identity: VerifiedIdentity): Promise<ResolutionWithCache> {
-  const response = await fetch(`${config.backendBaseUrl}/api/internal/mcp/resolve`, {
+  // Resolution is shared by same-subject callers, so a caller cancellation
+  // must not cancel other tools. This shared request has its own finite deadline.
+  const body = await identityJson('/api/internal/mcp/resolve', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Internal-Secret': config.internalSecret,
-    },
+    headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': config.internalSecret },
     body: JSON.stringify({ subject: identity.subject, email: identity.email }),
   });
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(`Identity resolution failed (${response.status}): ${body}`);
+  if (body.user_id !== identity.subject || typeof body.api_key !== 'string' || !body.api_key
+      || typeof body.plan !== 'string' || typeof body.gsc_connected !== 'boolean'
+      || typeof body.expires_at !== 'number') {
+    throw new Error('Identity resolution returned an invalid delegation.');
   }
-
-  const body = (await response.json()) as {
-    user_id: string;
-    api_key: string;
-    expires_at: number;
-    plan: string;
-    gsc_connected: boolean;
-  };
 
   const expiresAt = Number(body.expires_at) * 1000 - EXPIRY_SKEW_MS;
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
@@ -104,13 +115,10 @@ async function resolveViaBackend(identity: VerifiedIdentity): Promise<Resolution
 }
 
 async function resolveViaDevToken(subject: string, rawToken: string): Promise<ResolutionWithCache> {
-  const response = await fetch(`${config.backendBaseUrl}/api/v1/me`, {
+  const body = await identityJson('/api/v1/me', {
     headers: { Authorization: `Bearer ${rawToken}` },
   });
-  if (!response.ok) {
-    throw new Error(`Dev token no longer resolves (${response.status})`);
-  }
-  const body = (await response.json()) as { plan: string };
+  if (typeof body.plan !== 'string') throw new Error('Invalid developer identity response.');
   const value = { userId: subject, apiKey: rawToken, plan: body.plan, gscConnected: false };
   // Dev keys do not carry an expiry. Cache only briefly, and never share a
   // cache entry between distinct caller-provided keys.

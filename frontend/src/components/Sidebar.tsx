@@ -19,7 +19,8 @@ export function Sidebar({ onLogout }: SidebarProps) {
 
   // Load collapsed state from localStorage
   useEffect(() => {
-    const saved = localStorage.getItem('sidebar-collapsed');
+    let saved: string | null = null;
+    try { saved = localStorage.getItem('sidebar-collapsed'); } catch { /* Navigation works without storage. */ }
     if (saved) {
       setIsCollapsed(saved === 'true');
     }
@@ -29,7 +30,7 @@ export function Sidebar({ onLogout }: SidebarProps) {
   const toggleCollapse = () => {
     const newState = !isCollapsed;
     setIsCollapsed(newState);
-    localStorage.setItem('sidebar-collapsed', String(newState));
+    try { localStorage.setItem('sidebar-collapsed', String(newState)); } catch { /* Keep the in-memory preference. */ }
   };
 
   const navItems = MCP_PIVOT_ENABLED
@@ -55,13 +56,13 @@ export function Sidebar({ onLogout }: SidebarProps) {
   return (
     <div
       className={`relative shrink-0 flex flex-col bg-card border-r border-border transition-all duration-300 ${
-        isCollapsed ? 'w-16' : 'w-64'
+        isCollapsed ? 'w-16' : 'w-16 md:w-64'
       }`}
     >
       {/* Logo/Brand */}
       <div className="flex items-center justify-between p-4 border-b border-border">
         {!isCollapsed && (
-          <div className="flex items-center gap-2">
+          <div className="hidden md:flex items-center gap-2">
             <img src={faviconImg} alt="RedirX" className="w-8 h-8 rounded object-contain" />
             <span className="font-semibold text-foreground">RedirX</span>
           </div>
@@ -71,8 +72,10 @@ export function Sidebar({ onLogout }: SidebarProps) {
         )}
       </div>
 
+      {!isCollapsed && <img src={faviconImg} alt="RedirX" className="md:hidden w-8 h-8 mx-auto my-3" />}
+
       {/* Navigation */}
-      <nav className="flex-1 p-3">
+      <nav aria-label="Primary" className="flex-1 p-3">
         <div className="space-y-1">
           {navItems.map((item) => {
             const Icon = item.icon;
@@ -86,10 +89,12 @@ export function Sidebar({ onLogout }: SidebarProps) {
                     ? 'bg-primary text-primary-foreground'
                     : 'text-muted-foreground hover:bg-muted hover:text-foreground'
                 } ${isCollapsed ? 'justify-center' : ''}`}
-                title={isCollapsed ? item.label : ''}
+                title={item.label}
+                aria-label={item.label}
+                aria-current={isActive ? 'page' : undefined}
               >
                 <Icon className="h-5 w-5 flex-shrink-0" />
-                {!isCollapsed && <span className="text-sm font-medium">{item.label}</span>}
+                {!isCollapsed && <span className="hidden md:inline text-sm font-medium">{item.label}</span>}
               </button>
             );
           })}
@@ -103,17 +108,19 @@ export function Sidebar({ onLogout }: SidebarProps) {
           className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors ${
             isCollapsed ? 'justify-center' : ''
           }`}
-          title={isCollapsed ? 'Logout' : ''}
+          title="Logout" aria-label="Logout"
         >
           <LogOut className="h-5 w-5 flex-shrink-0" />
-          {!isCollapsed && <span className="text-sm font-medium">Logout</span>}
+          {!isCollapsed && <span className="hidden md:inline text-sm font-medium">Logout</span>}
         </button>
       </div>
 
       {/* Toggle Button */}
       <button
         onClick={toggleCollapse}
-        className="absolute -right-3 top-20 w-6 h-6 rounded-full border border-border bg-background shadow-sm flex items-center justify-center hover:bg-muted transition-colors"
+        aria-expanded={!isCollapsed}
+        aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        className="hidden md:flex absolute -right-3 top-20 w-6 h-6 rounded-full border border-border bg-background shadow-sm flex items-center justify-center hover:bg-muted transition-colors"
         title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
       >
         {isCollapsed ? (

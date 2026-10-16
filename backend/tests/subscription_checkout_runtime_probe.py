@@ -3,13 +3,15 @@ import json
 import os
 from types import SimpleNamespace
 import psycopg
+from backend.tests.helpers.disposable_postgres import validate_disposable_postgres_config
 from psycopg import sql
 from backend.services.migration_subscription_service import MigrationSubscriptionService
 from backend.tests import test_migration_subscription_checkout_service as checkout_fixtures
 
 config=json.loads(os.environ['SUBSCRIPTION_FIXTURE_CONNECTION'])
-if config['host']!='127.0.0.1' or config['password']!='local-fixture-only' or config['dbname']!='postgres':
-    raise RuntimeError('Disposable local fixture required.')
+validate_disposable_postgres_config(config)
+if config['password']!='local-fixture-only' or config['dbname']!='postgres':
+    raise RuntimeError('A disposable local PostgreSQL fixture is required.')
 scope=json.loads(os.environ['SUBSCRIPTION_FIXTURE_SCOPE'])
 connection=psycopg.connect(**config,autocommit=True);connection.execute('SET ROLE service_role')
 class Table:

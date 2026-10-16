@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -21,6 +22,7 @@ interface ShortcutGroup {
 }
 
 export function KeyboardShortcutsDialog({ open, onOpenChange }: KeyboardShortcutsDialogProps) {
+  const returnFocus = useRef<HTMLElement | null>(null);
   const shortcutGroups: ShortcutGroup[] = [
     {
       title: 'Navigation',
@@ -46,7 +48,9 @@ export function KeyboardShortcutsDialog({ open, onOpenChange }: KeyboardShortcut
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto"
+        onOpenAutoFocus={() => { returnFocus.current = document.activeElement as HTMLElement; }}
+        onCloseAutoFocus={event => { event.preventDefault(); returnFocus.current?.focus(); }}>
         <DialogHeader>
           <DialogTitle>Keyboard Shortcuts</DialogTitle>
           <DialogDescription>
@@ -77,7 +81,7 @@ export function KeyboardShortcutsDialog({ open, onOpenChange }: KeyboardShortcut
 
         <div className="mt-6 pt-4 border-t border-border">
           <p className="text-xs text-muted-foreground text-center">
-            Press <kbd className="inline-flex items-center rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs">Esc</kbd> or <kbd className="inline-flex items-center rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs">?</kbd> to close this dialog
+            Press <kbd className="inline-flex items-center rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs">Esc</kbd> to close this dialog
           </p>
         </div>
       </DialogContent>

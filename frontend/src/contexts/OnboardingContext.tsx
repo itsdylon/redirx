@@ -1,3 +1,4 @@
+import { useRequestScope } from '../components/pivot/useRequestScope';
 import {
   createContext,
   useCallback,
@@ -5,6 +6,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  useRef,
   ReactNode,
 } from 'react';
 import {
@@ -39,59 +41,86 @@ const OnboardingContext = createContext<OnboardingContextType | undefined>(undef
 
 export function OnboardingProvider({ children }: { children: ReactNode }) {
   const { user, loading: authLoading } = useAuth();
+  return <OwnedOnboardingProvider ownerId={user?.id} authLoading={authLoading}>{children}</OwnedOnboardingProvider>;
+}
+
+function OwnedOnboardingProvider({ children, ownerId, authLoading }: { children: ReactNode; ownerId?: string; authLoading: boolean }) {
+  const scope = useRequestScope(ownerId || 'signed-out');
+  const revision = useRef(0);
+  const generation = useRef(0);
+  const [stateOwner, setStateOwner] = useState(ownerId);
   const [onboarding, setOnboarding] = useState<OnboardingResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [entryModalOpen, setEntryModalOpen] = useState(false);
+  // Reset only onboarding state, never the App/AuthCallback subtree. React
+  // restarts this render before children receive another owner's state.
+  if (stateOwner !== ownerId) {
+    generation.current++; revision.current++;
+    setStateOwner(ownerId);
+    setOnboarding(null); setLoading(true); setError(null); setEntryModalOpen(false);
+  }
+  const activeGeneration = generation.current;
 
   const refreshOnboarding = useCallback(async (): Promise<OnboardingResponse | null> => {
-    if (!user) {
+    if (activeGeneration !== generation.current || scope.signal().aborted) return null;
+    if (!ownerId) {
       setOnboarding(null);
       setLoading(false);
       return null;
     }
 
+    const request = ++revision.current;
+    const signal = scope.signal();
     setLoading(true);
     setError(null);
 
     try {
-      const data = await getOnboarding();
+      const data = await getOnboarding(signal);
+      if (signal.aborted || request !== revision.current) return null;
       setOnboarding(data);
       return data;
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load onboarding state');
+      if (!signal.aborted && request === revision.current) setError(err instanceof Error ? err.message : 'Failed to load onboarding state');
       return null;
     } finally {
-      setLoading(false);
+      if (!signal.aborted && request === revision.current) setLoading(false);
     }
-  }, [user]);
+  }, [ownerId, activeGeneration]);
 
   const applyUpdate = useCallback(async (payload: Parameters<typeof updateOnboarding>[0]) => {
-    if (!user) return null;
+    if (!ownerId || activeGeneration !== generation.current || scope.signal().aborted) return null;
+    const request = ++revision.current;
+    const signal = scope.signal();
     setError(null);
     try {
-      const data = await updateOnboarding(payload);
-      setOnboarding(data);
+      const data = await updateOnboarding(payload, signal);
+      if (signal.aborted) return null;
+      if (request === revision.current) { setOnboarding(data); setLoading(false); }
       return data;
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update onboarding state');
+      if (!signal.aborted && request === revision.current) { setError(err instanceof Error ? err.message : 'Failed to update onboarding state'); setLoading(false); }
       return null;
     }
-  }, [user]);
+  }, [ownerId, activeGeneration]);
 
   const createSampleSession = useCallback(async (): Promise<SampleSessionResponse> => {
+    const signal = scope.signal();
+    if (!ownerId || activeGeneration !== generation.current || signal.aborted) throw new DOMException('Onboarding account changed', 'AbortError');
     setError(null);
     try {
-      return await createOnboardingSampleSession();
+      const result = await createOnboardingSampleSession(signal);
+      if (signal.aborted) throw new DOMException('Onboarding account changed', 'AbortError');
+      return result;
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create sample tutorial session');
+      if (!signal.aborted) setError(err instanceof Error ? err.message : 'Failed to create sample tutorial session');
       throw err;
     }
-  }, []);
+  }, [ownerId, activeGeneration]);
 
   useEffect(() => {
     if (authLoading) return;
-    if (!user) {
+    if (!ownerId || scope.signal().aborted) {
       setOnboarding(null);
       setEntryModalOpen(false);
       setError(null);
@@ -99,7 +128,7 @@ export function OnboardingProvider({ children }: { children: ReactNode }) {
       return;
     }
     refreshOnboarding();
-  }, [authLoading, user, refreshOnboarding]);
+  }, [authLoading, ownerId, refreshOnboarding]);
 
   const contextValue = useMemo<OnboardingContextType>(() => {
     return {
@@ -107,7 +136,7 @@ export function OnboardingProvider({ children }: { children: ReactNode }) {
       loading,
       error,
       entryModalOpen,
-      setEntryModalOpen,
+      setEntryModalOpen: open => { if (activeGeneration === generation.current) setEntryModalOpen(open); },
       refreshOnboarding,
       startOnboarding: () => applyUpdate({ action: 'start' }),
       selectPath: (path) => applyUpdate({ action: 'select_path', path }),
@@ -118,7 +147,7 @@ export function OnboardingProvider({ children }: { children: ReactNode }) {
       createSampleSession,
       isStepCompleted: (step) => !!onboarding?.onboarding_state?.steps?.[step]?.completed,
     };
-  }, [applyUpdate, createSampleSession, entryModalOpen, error, loading, onboarding, refreshOnboarding]);
+  }, [activeGeneration, applyUpdate, createSampleSession, entryModalOpen, error, loading, onboarding, refreshOnboarding]);
 
   return (
     <OnboardingContext.Provider value={contextValue}>

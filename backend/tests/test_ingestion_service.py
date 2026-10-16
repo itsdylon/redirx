@@ -6,7 +6,7 @@ import asyncio
 import os
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 sys.path.insert(0, BASE_DIR)
@@ -163,6 +163,47 @@ class TestIngestSideAsymmetry(unittest.TestCase):
         self.assertTrue(out["baseline_id"])
         urls = [e["url"] for e in out["entries"]]
         self.assertEqual(urls[0], "https://e.com/ranked")  # traffic leads
+
+    def test_explicit_opt_out_skips_gsc_construction_enrichment_and_baseline(self):
+        svc = IngestionService(connection_db=object(), baseline_db=object())
+        with patch("backend.services.ingestion_service.GSCService") as constructor, patch.object(
+            svc, "gsc_urls_for_domain", wraps=svc.gsc_urls_for_domain
+        ) as enrich, patch.object(svc, "capture_baseline", wraps=svc.capture_baseline) as baseline, patch(
+            "backend.services.ingestion_service.discover_site",
+            side_effect=_async(FakeDiscovery(["https://e.com/Only%2FPage?q=A&b=2"])),
+        ) as discovery:
+            out = run(svc.ingest_side("u1", "e.com", "old", 100, 5,
+                                     gsc_property_override="sc-domain:e.com", use_gsc=False))
+        self.assertEqual(constructor.call_count, 0)
+        self.assertEqual(enrich.call_count, 0)
+        self.assertEqual(baseline.call_count, 0)
+        self.assertEqual(discovery.call_count, 1)
+        self.assertFalse(discovery.call_args.kwargs["owner_verified"])
+        self.assertEqual(out["gsc_url_count"], 0)
+        self.assertIsNone(out["baseline_id"])
+        self.assertEqual([e["url"] for e in out["entries"]], ["https://e.com/Only%2FPage?q=A&b=2"])
+
+    def test_opt_out_and_default_with_known_traffic(self):
+        svc = self._service([gsc("https://e.com/ranked", 300, 900)])
+        svc.gsc_urls_for_domain = Mock(wraps=svc.gsc_urls_for_domain)
+        svc.capture_baseline = Mock(wraps=svc.capture_baseline)
+        with patch("backend.services.ingestion_service.discover_site", side_effect=_async(FakeDiscovery(["https://e.com/page"]))):
+            enabled = run(svc.ingest_side("u1", "e.com", "old", 100, 5))
+            disabled = run(svc.ingest_side("u1", "e.com", "old", 100, 5, use_gsc=False))
+        self.assertEqual(svc.gsc_urls_for_domain.call_count, 1)
+        self.assertEqual(svc.capture_baseline.call_count, 1)
+        self.assertEqual(enabled["summary"]["total_clicks"], 300)
+        self.assertEqual(disabled["summary"]["total_clicks"], 0)
+        self.assertEqual(len(enabled["entries"]), 2)
+        self.assertEqual(len(disabled["entries"]), 1)
+
+    def test_rejects_non_boolean_gsc_flag_before_discovery(self):
+        svc = self._service([])
+        with patch("backend.services.ingestion_service.discover_site") as discovery:
+            for flag in ("false", "true", 0, 1, None, [], {}):
+                with self.subTest(flag=flag), self.assertRaises(ValueError):
+                    run(svc.ingest_side("u1", "e.com", "old", 100, 5, use_gsc=flag))
+        discovery.assert_not_called()
 
     def test_new_side_skips_gsc_entirely(self):
         # New URLs aren't indexed, so querying GSC would cost a round trip to

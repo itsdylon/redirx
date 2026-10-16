@@ -132,6 +132,7 @@ class ErrorTransparencyRouteTests(unittest.TestCase):
             with patch("backend.routes.auth_routes.AuthService") as mock_auth_service:
                 with patch("redirx.database.SupabaseClient.get_client", return_value=mock_client):
                     with patch("backend.services.email_service.EmailService") as mock_email_service:
+                        mock_email_service.return_value.send_welcome.return_value = "accepted-fixture"
                         mock_auth_service.return_value.get_user_profile.return_value = {
                             "full_name": "Test User",
                             "welcome_email_sent": False,

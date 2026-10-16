@@ -82,6 +82,15 @@ describe('WatchPrompt', () => {
     expect(await screen.findByRole('button', { name: /start monitoring/i })).toBeTruthy();
   });
 
+  it('shows retry and never offers a duplicate monitor when history fails', async () => {
+    listWatches.mockRejectedValue(new Error('Unavailable'));
+    renderPrompt();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Monitoring status could not load');
+    expect(screen.getByRole('button', { name: 'Retry monitoring status' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /start monitoring/i })).not.toBeInTheDocument();
+    expect(createWatch).not.toHaveBeenCalled();
+  });
+
   it('starts a watch and opens it', async () => {
     listWatches.mockResolvedValue([]);
     createWatch.mockResolvedValue({ id: 'watch-9', session_id: 'session-123' });
@@ -90,7 +99,7 @@ describe('WatchPrompt', () => {
     await userEvent.click(await screen.findByRole('button', { name: /start monitoring/i }));
 
     await waitFor(() => {
-      expect(createWatch).toHaveBeenCalledWith({ sessionId: 'session-123' });
+      expect(createWatch).toHaveBeenCalledWith({ sessionId: 'session-123' }, expect.any(AbortSignal));
       expect(mockNavigate).toHaveBeenCalledWith('/watch/watch-9');
     });
   });

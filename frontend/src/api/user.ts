@@ -14,9 +14,10 @@ export interface UserProfileResponse {
   profile: UserProfile;
 }
 
-export async function getUserProfile(): Promise<UserProfileResponse> {
+export async function getUserProfile(signal?: AbortSignal): Promise<UserProfileResponse> {
   const response = await fetch(`${API_BASE_URL}/api/user/profile`, {
     method: 'GET',
+    signal,
     headers: getAuthHeaders(),
   });
 

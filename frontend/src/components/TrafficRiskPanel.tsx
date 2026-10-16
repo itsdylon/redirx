@@ -44,8 +44,8 @@ export function TrafficRiskPanel({
               Found {risk.total.toLocaleString()} pages on {risk.domain}
             </p>
             <p className="text-sm text-muted-foreground mt-1">
-              We can&rsquo;t tell which ones matter. Connect Search Console to see which pages
-              carry your traffic — and which are about to break.
+              Search traffic has not been measured. Connect Search Console to prioritize
+              redirects using recorded clicks and impressions.
             </p>
           </div>
         </div>
@@ -71,11 +71,11 @@ export function TrafficRiskPanel({
         <div className="flex-1">
           <p className={compact ? 'text-base font-medium text-foreground' : 'text-xl font-semibold text-foreground'}>
             {risk.topUrlCount.toLocaleString()} of {risk.total.toLocaleString()} pages carry{' '}
-            {risk.shareTarget}% of your organic {metric}
+            at least {risk.shareTarget}% of recorded organic {metric}
           </p>
           <p className="text-sm text-muted-foreground mt-1">
-            That&rsquo;s {concentration}% of {risk.domain}. Break those and you lose most of what
-            Google sends you.
+            That&rsquo;s {concentration}% of the pages on {risk.domain}. Prioritize checking their
+            destinations before and after the move.
           </p>
 
           <div className="mt-4 flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted-foreground tabular-nums">
@@ -95,15 +95,15 @@ export function TrafficRiskPanel({
           {!compact && risk.topUrls.length > 0 && (
             <div className="mt-5 border-t border-border pt-4">
               <p className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
-                Most at risk
+                Review first
               </p>
               <ul className="space-y-1">
                 {risk.topUrls.map((u) => (
                   <li key={u.url} className="flex items-baseline gap-3 text-sm">
                     <span className="tabular-nums text-foreground w-16 text-right flex-shrink-0">
-                      {u.clicks.toLocaleString()}
+                      {(risk.weightMetric === 'clicks' ? u.clicks : u.impressions).toLocaleString()}
                     </span>
-                    <span className="text-muted-foreground text-xs w-12 flex-shrink-0">clicks</span>
+                    <span className="text-muted-foreground text-xs w-20 flex-shrink-0">{metric}</span>
                     <span className="font-mono text-xs text-muted-foreground truncate">
                       {pathOf(u.url)}
                     </span>

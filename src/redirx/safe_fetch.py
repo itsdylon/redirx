@@ -98,17 +98,20 @@ def validate_public_url(url: str) -> None:
     """
     try:
         parsed = urlparse(url)
+        # urllib checks invalid/out-of-range ports lazily. Keep those failures
+        # inside the same bounded rejection contract as every other URL rule.
+        host = parsed.hostname or ""
+        explicit_port = parsed.port
     except Exception as exc:
         raise SSRFBlockedError() from exc
 
     if parsed.scheme not in ALLOWED_SCHEMES:
         raise SSRFBlockedError()
-    host = parsed.hostname or ""
     if not host:
         raise SSRFBlockedError()
     if host in ("localhost",) or host.endswith(".localhost") or host.endswith(".internal"):
         raise SSRFBlockedError()
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    port = explicit_port if explicit_port is not None else (443 if parsed.scheme == "https" else 80)
     if port not in ALLOWED_PORTS:
         raise SSRFBlockedError()
 

@@ -8,7 +8,7 @@ vi.mock('../src/config.js', () => ({
   },
 }));
 
-const { resolveIdentity, _resetIdentityCacheForTests } = await import('../src/auth/identity.js');
+const { resolveIdentity, _resetIdentityCacheForTests, IDENTITY_REQUEST_TIMEOUT_MS } = await import('../src/auth/identity.js');
 const { config } = await import('../src/config.js');
 
 function jsonResponse(body: unknown, status = 200) {
@@ -30,6 +30,7 @@ describe('resolveIdentity (oauth mode)', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     config.authMode = 'oauth';
     vi.unstubAllGlobals();
   });
@@ -118,4 +119,38 @@ describe('resolveIdentity (oauth mode)', () => {
     expect(second.apiKey).toBe('rdx_second');
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+  it('expires a stalled shared identity request and permits an explicit later retry', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockImplementationOnce((_url, init) => new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new Error('private upstream details')));
+    })).mockResolvedValueOnce(jsonResponse(resolvedBody('recovered')));
+    const first = resolveIdentity({ subject: 'user-1' }, 'one');
+    const second = resolveIdentity({ subject: 'user-1' }, 'two');
+    const outcomes = Promise.allSettled([first, second]);
+    await vi.advanceTimersByTimeAsync(IDENTITY_REQUEST_TIMEOUT_MS);
+    expect((await outcomes).map(result => result.status)).toEqual(['rejected', 'rejected']);
+    await expect(first).rejects.toThrow('timed out');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(resolveIdentity({ subject: 'user-1' }, 'three')).resolves.toMatchObject({ apiKey: 'recovered' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('rejects malformed and cross-subject delegations without caching them', async () => {
+    for (const change of [{ user_id: 'other-user' }, { api_key: '' }, { expires_at: '123' }, { gsc_connected: 'false' }]) {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ ...resolvedBody(), ...change }));
+      await expect(resolveIdentity({ subject: 'user-1' }, 'token')).rejects.toThrow('invalid delegation');
+    }
+    fetchMock.mockResolvedValueOnce(jsonResponse(resolvedBody()));
+    await expect(resolveIdentity({ subject: 'user-1' }, 'token')).resolves.toMatchObject({ userId: 'user-1' });
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it('does not surface backend bodies in identity failures', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('private credential details', { status: 502 }));
+    const error = await resolveIdentity({ subject: 'user-1' }, 'token').catch(error => error);
+    expect(error.message).toContain('502');
+    expect(error.message).not.toContain('private');
+  });
+
 });

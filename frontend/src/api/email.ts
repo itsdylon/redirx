@@ -59,6 +59,9 @@ export async function sendTestEmail(data: {
 // User: Email Preferences
 // ============================================================================
 
+export const OPTIONAL_EMAIL_TYPES = ['mapping_complete', 'mapping_failed', 'watch_alert', 'onboard_nudge'] as const;
+export type OptionalEmailType = typeof OPTIONAL_EMAIL_TYPES[number];
+
 export interface EmailPreference {
   email_type: string;
   opted_out: boolean;
@@ -73,11 +76,16 @@ export async function getEmailPreferences(): Promise<EmailPreference[]> {
     throw new Error(err.error || 'Failed to fetch email preferences');
   }
   const json = await res.json();
+  if (!Array.isArray(json?.preferences) || json.preferences.some((value: unknown) =>
+    !value || typeof value !== 'object' || !('email_type' in value) || typeof value.email_type !== 'string' ||
+    !('opted_out' in value) || typeof value.opted_out !== 'boolean')) {
+    throw new Error('Notification preferences could not be verified. Reload to try again.');
+  }
   return json.preferences;
 }
 
 export async function updateEmailPreference(
-  emailType: string,
+  emailType: OptionalEmailType,
   optedOut: boolean
 ): Promise<void> {
   const res = await fetch(`${API_BASE_URL}/api/email/preferences`, {
@@ -89,6 +97,8 @@ export async function updateEmailPreference(
     const err = await res.json();
     throw new Error(err.error || 'Failed to update email preference');
   }
+  const data = await res.json();
+  if (data?.success !== true) throw new Error('Your notification preference was not confirmed. Reload to check.');
 }
 
 // ============================================================================

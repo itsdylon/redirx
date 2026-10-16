@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { usePostHog } from '@posthog/react';
 import { useHotkeys } from 'react-hotkeys-hook';
@@ -63,6 +63,8 @@ export interface RedirectMapping {
   id: string;
   oldUrl: string;
   newUrl: string;
+  /** Authoritative saved target for review preconditions; null differs from empty. */
+  persistedNewUrl?: string | null;
   confidence: number;
   confidenceBand: 'high' | 'medium' | 'low';
   matchScore: number;
@@ -93,11 +95,24 @@ interface ReviewInterfaceProps {
   pivotEnabled?: boolean;
 }
 
-export function ReviewInterface({ layoutVariant = 'dashboard', pivotEnabled = MCP_PIVOT_ENABLED }: ReviewInterfaceProps = {}) {
+export function ReviewInterface(props: ReviewInterfaceProps = {}) {
+  const { user } = useAuth();
+  const { sessionId } = useParams<{ sessionId: string }>();
+  // Every local draft, selection and dialog belongs to this owner and result.
+  return <OwnerReviewInterface key={`${user?.id ?? 'signed-out'}:${sessionId ?? ''}`} {...props} />;
+}
+
+function OwnerReviewInterface({ layoutVariant = 'dashboard', pivotEnabled = MCP_PIVOT_ENABLED }: ReviewInterfaceProps) {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
   const posthog = usePostHog();
   const { user } = useAuth();
+  const queryClient = useQueryClient();
+  const active = useRef(true);
+  const saveLock = useRef(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const [searchParams] = useSearchParams();
   const {
     onboarding,
@@ -146,15 +161,18 @@ export function ReviewInterface({ layoutVariant = 'dashboard', pivotEnabled = MC
   const sampleTutorialBanner = tutorialFromQuery && onboarding?.onboarding_state.path === 'sample';
 
   const resultsQuery = useQuery({
-    queryKey: queryKeys.results.bySession(sessionId || ''),
-    queryFn: () => getResults(sessionId!),
-    enabled: !!sessionId,
+    queryKey: queryKeys.results.forOwner(user?.id || '', sessionId || ''),
+    queryFn: ({ signal }) => getResults(sessionId!, signal),
+    enabled: !!sessionId && !!user?.id,
+    retry: false,
+    refetchOnMount: 'always',
   });
 
-  const deepPreviewEnabled = !pivotEnabled && !!sessionId && pipelineType === 'url_only' && isFreeUser;
+  const deepPreviewEnabled = !pivotEnabled && !!user?.id && !!sessionId && pipelineType === 'url_only' && isFreeUser;
   const deepPreviewQuery = useQuery({
-    queryKey: queryKeys.results.deepPreview(sessionId || ''),
-    queryFn: () => getDeepPreview(sessionId!),
+    queryKey: queryKeys.results.deepPreviewForOwner(user?.id || '', sessionId || ''),
+    queryFn: ({ signal }) => getDeepPreview(sessionId!, signal),
+    retry: false,
     enabled: deepPreviewEnabled,
     refetchInterval: (query) => {
       const data = query.state.data as DeepPreviewResponse | undefined;
@@ -173,10 +191,11 @@ export function ReviewInterface({ layoutVariant = 'dashboard', pivotEnabled = MC
           : 'Unable to load Deep Match preview.')
       : null;
 
-  const unlockStatusEnabled = !!sessionId && pipelineType === 'url_only';
+  const unlockStatusEnabled = !!user?.id && !!sessionId && pipelineType === 'url_only';
   const unlockStatusQuery = useQuery({
-    queryKey: queryKeys.billing.unlockStatus(sessionId || ''),
-    queryFn: () => getProjectUnlockStatus(sessionId!),
+    queryKey: queryKeys.billing.unlockStatusForOwner(user?.id || '', sessionId || ''),
+    queryFn: ({ signal }) => getProjectUnlockStatus(sessionId!, signal),
+    retry: false,
     enabled: unlockStatusEnabled,
     refetchInterval: (query) => {
       const data = query.state.data;
@@ -240,7 +259,7 @@ export function ReviewInterface({ layoutVariant = 'dashboard', pivotEnabled = MC
       return;
     }
 
-    if (!resultsQuery.data || hydratedSessionRef.current === sessionId) {
+    if (!resultsQuery.data || resultsQuery.isFetching || hydratedSessionRef.current === sessionId) {
       return;
     }
 
@@ -264,7 +283,7 @@ export function ReviewInterface({ layoutVariant = 'dashboard', pivotEnabled = MC
         total_mappings: resultsQuery.data.mappings?.length ?? 0,
       });
     }
-  }, [resultsQuery.data, sessionId, posthog]);
+  }, [resultsQuery.data, resultsQuery.isFetching, sessionId, posthog]);
 
   // GSC metadata updates on every refetch (unlike redirects, which hydrate
   // once per session to preserve local edits). After a traffic sync, merge the
@@ -410,156 +429,113 @@ export function ReviewInterface({ layoutVariant = 'dashboard', pivotEnabled = MC
   };
 
   const handleEdit = (redirect: RedirectMapping) => {
+    if (saveLock.current || saveError) return;
     setEditingRow(redirect);
   };
 
-  /**
-   * Write a review decision to the server, keeping the optimistic local
-   * update either way. Decisions used to live only in this component's state,
-   * which made the database's needs_review a fiction everything downstream
-   * believed — the watch monitored the wrong rows and compared live sites
-   * against pre-edit targets, and the v1 export could disagree with the file
-   * this page builds. On failure the user is told the decision did not stick.
-   */
-  const persistDecision = (id: string, decision: ReviewDecision) => {
-    if (!sessionId) return;
-    persistReviewDecision(sessionId, id, decision).catch((error) => {
-      toast.error(
-        `Change shown here but not saved to the server — ${
-          error instanceof Error ? error.message : 'network error'
-        }`
-      );
-    });
-  };
-
-  const handleSaveEdit = (updatedRedirect: RedirectMapping) => {
-    const previous = redirects.find((r) => r.id === updatedRedirect.id);
-    setRedirects(redirects.map(r => r.id === updatedRedirect.id ? updatedRedirect : r));
-    setEditingRow(null);
-    toast.success('Redirect updated');
-    if (previous && previous.newUrl !== updatedRedirect.newUrl) {
-      persistDecision(updatedRedirect.id, {
-        new_url: updatedRedirect.newUrl,
-        match_type: 'manual',
-      });
+  const reloadResults = async () => {
+    if (saveLock.current) return;
+    const result = await resultsQuery.refetch();
+    if (!active.current) return;
+    if (result.data?.success && !result.error) {
+      setRedirects(result.data.mappings);
+      setSaveError(null);
+      setError(null);
+      setEditingRow(null);
+      setSelectedRows(new Set());
     }
   };
 
-  const handleBulkAction = (action: string) => {
-    // Persist only rows whose state actually changes — approve-all-high mostly
-    // hits rows the pipeline already approved, and re-writing those would be
-    // hundreds of no-op requests.
-    if (action === 'approve-all-high') {
-      const highConfidenceCount = redirects.filter(r => r.confidenceBand === 'high').length;
-      redirects
-        .filter((r) => r.confidenceBand === 'high' && !r.approved)
-        .forEach((r) => persistDecision(r.id, { approved: true }));
-      setRedirects(redirects.map((r) =>
-        r.confidenceBand === 'high' ? { ...r, approved: true } : r
-      ));
-      toast.success(`${highConfidenceCount} redirect${highConfidenceCount !== 1 ? 's' : ''} approved`);
-    } else if (action === 'approve-selected') {
-      const count = selectedRows.size;
-      redirects
-        .filter((r) => selectedRows.has(r.id) && !r.approved)
-        .forEach((r) => persistDecision(r.id, { approved: true }));
-      setRedirects(redirects.map((r) =>
-        selectedRows.has(r.id) ? { ...r, approved: true } : r
-      ));
-      setSelectedRows(new Set());
-      toast.success(`${count} redirect${count !== 1 ? 's' : ''} approved`);
-    } else if (action === 'reject-selected') {
-      const count = selectedRows.size;
-      redirects
-        .filter((r) => selectedRows.has(r.id) && r.approved)
-        .forEach((r) => persistDecision(r.id, { approved: false }));
-      setRedirects(redirects.map((r) =>
-        selectedRows.has(r.id) ? { ...r, approved: false } : r
-      ));
-      setSelectedRows(new Set());
-      toast.success(`${count} redirect${count !== 1 ? 's' : ''} rejected`);
+  // Explicit setters are sent once. A failed response is an unknown outcome,
+  // not proof of rollback; require readback before exporting the local snapshot.
+  const saveDecisions = async (changes: { row: RedirectMapping; decision: ReviewDecision }[]) => {
+    if (saveLock.current || saveError || !sessionId || !user?.id) return false;
+    saveLock.current = true;
+    setIsSaving(true);
+    const failed = new Set<string>();
+    let confirmed = 0;
+    let cursor = 0;
+    await Promise.all(Array.from({ length: Math.min(4, changes.length) }, async () => {
+      while (active.current && cursor < changes.length) {
+        const { row, decision } = changes[cursor++];
+        try {
+          const original = redirects.find(current => current.id === row.id);
+          if (!original) throw new Error('The reviewed row is no longer available.');
+          const expectedTarget = original.persistedNewUrl !== undefined ? original.persistedNewUrl : original.newUrl;
+          await persistReviewDecision(sessionId, row.id, { ...decision, expected_new_url: expectedTarget });
+          if (!active.current) return;
+          confirmed++;
+          // The legacy API trims edited targets. Retain the exact acknowledged
+          // value as the precondition for the next approval, not the old target.
+          const savedTarget = decision.new_url !== undefined ? decision.new_url.trim() : expectedTarget;
+          const savedRow = { ...row, newUrl: savedTarget ?? '', persistedNewUrl: savedTarget };
+          setRedirects(current => current.map(old => old.id === row.id ? savedRow : old));
+          queryClient.setQueryData(queryKeys.results.forOwner(user.id, sessionId), (data: any) => data ? {
+            ...data, mappings: data.mappings.map((old: RedirectMapping) => old.id === row.id ? savedRow : old),
+          } : data);
+        } catch {
+          failed.add(row.id);
+        }
+      }
+    }));
+    if (!active.current) return false;
+    saveLock.current = false;
+    setIsSaving(false);
+    if (failed.size) {
+      setSaveError(`${failed.size} save${failed.size === 1 ? ' was' : 's were'} not confirmed. Reload results to check the server state before exporting. Your last confirmed results are still shown.`);
+      setSelectedRows(failed);
     }
+    if (confirmed) toast.success(`${confirmed} review change${confirmed === 1 ? '' : 's'} saved`);
+    return failed.size === 0;
   };
 
+  const handleSaveEdit = async (updated: RedirectMapping) => {
+    const previous = redirects.find(row => row.id === updated.id);
+    if (!previous || saveLock.current) return;
+    if (previous.newUrl === updated.newUrl) { setEditingRow(null); return; }
+    // A changed target needs its own approval. Model confidence remains evidence,
+    // not an editable review label.
+    const saved = await saveDecisions([{ row: { ...previous, newUrl: updated.newUrl, matchType: 'manual', approved: false },
+      decision: { new_url: updated.newUrl, match_type: 'manual', approved: false } }]);
+    if (saved) setEditingRow(null);
+    else throw new Error('Save not confirmed. Close this editor and reload results to check the server state before trying again.');
+  };
 
-  const handleExport = async (format: string, confidenceLevels: string[]) => {
-    // Generate filename
-    const formatExtensions: Record<string, string> = {
-      apache: '.htaccess',
-      nginx: '_nginx.conf',
-      wordpress: '_wordpress.csv',
-      cloudflare: '',
-      shopify: '.csv',
-    };
+  const handleBulkAction = async (action: string) => {
+    if (action === 'clear-selection') { setSelectedRows(new Set()); return; }
+    if (saveLock.current) return;
+    const approved = action !== 'reject-selected';
+    const rows = redirects.filter(row =>
+      (action === 'approve-all-high' ? row.confidenceBand === 'high' : selectedRows.has(row.id)) && row.approved !== approved);
+    if (!rows.length) { toast.info('No approval changes needed.'); return; }
+    const saved = await saveDecisions(rows.map(row => ({ row: { ...row, approved }, decision: { approved } })));
+    if (saved && active.current) setSelectedRows(new Set());
+  };
 
-    const formatNames: Record<string, string> = {
-      apache: 'redirects_apache',
-      nginx: 'redirects_nginx',
-      wordpress: 'redirects_wordpress',
-      cloudflare: '_redirects',
-      shopify: 'shopify_redirects',
-    };
-
-    const today = new Date().toISOString().split('T')[0];
-    const filename = `${formatNames[format]}_${today}${formatExtensions[format]}`;
-
-    // Show success toast
-    toast.success(`${filename} downloaded successfully`, {
-      duration: 3000,
-    });
-
+  const handleExport = async (_format: string, _confidenceLevels: string[]) => {
     if (tutorialActive && !isStepCompleted('export_redirects')) {
       const updated = await completeStep('export_redirects');
-      if (updated?.onboarding_status === 'completed') {
-        setShowTutorialSuccess(true);
-      }
+      if (active.current && updated?.onboarding_status === 'completed') setShowTutorialSuccess(true);
     }
   };
 
-  /** Take a proposed repair: point the row at it and clear the suggestion. */
-  const handleAcceptRepair = (id: string) => {
-    const target = redirects.find((r) => r.id === id);
-    if (target?.repair) {
-      persistDecision(id, {
-        new_url: target.repair.url,
-        approved: true,
-        match_type: 'rule_repaired',
-        confidence: target.repair.confidence / 100,
-        clear_repair: true,
-      });
-    }
-    setRedirects((prev) =>
-      prev.map((r) =>
-        r.id === id && r.repair
-          ? {
-              ...r,
-              newUrl: r.repair.url,
-              confidence: r.repair.confidence,
-              matchScore: r.repair.confidence,
-              matchType: 'rule_repaired',
-              approved: true,
-              warnings: r.warnings.filter((w) => w !== 'needs-review'),
-              repair: undefined,
-            }
-          : r
-      )
-    );
+  const handleAcceptRepair = async (id: string) => {
+    const target = redirects.find(row => row.id === id);
+    if (!target?.repair) return;
+    const repair = target.repair;
+    await saveDecisions([{ row: { ...target, newUrl: repair.url, confidence: repair.confidence,
+      matchScore: repair.confidence, confidenceBand: repair.confidence >= 85 ? 'high' : repair.confidence >= 65 ? 'medium' : 'low', matchType: 'rule_repaired', approved: true,
+      warnings: target.warnings.filter(warning => warning !== 'needs-review'), repair: undefined },
+      decision: { new_url: repair.url, approved: true, match_type: 'rule_repaired', confidence: repair.confidence / 100, clear_repair: true } }]);
   };
 
   const handleDismissRepair = (id: string) => {
-    setRedirects((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, repair: undefined } : r))
-    );
+    if (!saveLock.current) setRedirects(current => current.map(row => row.id === id ? { ...row, repair: undefined } : row));
   };
 
-  const handleApproveRow = (id: string) => {
-    const redirect = redirects.find(r => r.id === id);
-    const newApproved = !redirect?.approved;
-    setRedirects(redirects.map((r) =>
-      r.id === id ? { ...r, approved: newApproved } : r
-    ));
-    toast.success(newApproved ? 'Redirect approved' : 'Approval removed');
-    persistDecision(id, { approved: newApproved });
+  const handleApproveRow = async (id: string) => {
+    const row = redirects.find(row => row.id === id);
+    if (row) await saveDecisions([{ row: { ...row, approved: !row.approved }, decision: { approved: !row.approved } }]);
   };
 
   const handleDeepUnlockClick = () => {
@@ -666,43 +642,18 @@ export function ReviewInterface({ layoutVariant = 'dashboard', pivotEnabled = MC
   // Keyboard shortcuts
   const modKey = isMac() ? 'meta' : 'ctrl';
 
-  // Ctrl/Cmd+K: Focus search
-  useHotkeys(`${modKey}+k`, (e) => {
-    e.preventDefault();
-    searchInputRef.current?.focus();
-  }, { enableOnFormTags: true, preventDefault: true });
-
-  // Ctrl/Cmd+E: Open export modal
-  useHotkeys(`${modKey}+e`, (e) => {
-    e.preventDefault();
-    if (!exportModalOpen) {
-      setExportModalOpen(true);
-    }
-  }, [exportModalOpen]);
-
-  // Escape: Close modals
-  useHotkeys('escape', () => {
-    if (exportModalOpen) {
-      setExportModalOpen(false);
-    } else if (keyboardShortcutsOpen) {
-      setKeyboardShortcutsOpen(false);
-    } else if (editingRow) {
-      setEditingRow(null);
-    }
-  }, [exportModalOpen, keyboardShortcutsOpen, editingRow]);
-
-  // Ctrl/Cmd+A: Select all visible redirects
-  useHotkeys(`${modKey}+a`, (e) => {
-    e.preventDefault();
-    const allVisibleIds = new Set(pageRedirects.map(r => r.id));
-    setSelectedRows(allVisibleIds);
-    toast.success(`Selected ${allVisibleIds.size} redirect${allVisibleIds.size !== 1 ? 's' : ''}`);
-  }, [pageRedirects]);
-
-  // ?: Show keyboard shortcuts
-  useHotkeys('shift+/', () => {
-    setKeyboardShortcutsOpen(true);
-  }, []);
+  const dialogOpen = exportModalOpen || keyboardShortcutsOpen || !!editingRow || showTutorialSuccess;
+  const canExport = !isSaving && !saveError && !isLoading;
+  useHotkeys(`${modKey}+k`, event => {
+    event.preventDefault(); searchInputRef.current?.focus();
+  }, { enabled: !dialogOpen, enableOnFormTags: true, preventDefault: true }, [dialogOpen]);
+  useHotkeys(`${modKey}+e`, event => {
+    event.preventDefault(); setExportModalOpen(true);
+  }, { enabled: !dialogOpen && canExport }, [dialogOpen, canExport]);
+  useHotkeys(`${modKey}+a`, event => {
+    event.preventDefault(); setSelectedRows(new Set(pageRedirects.map(row => row.id)));
+  }, { enabled: !dialogOpen && !isSaving }, [dialogOpen, isSaving, pageRedirects]);
+  useHotkeys('shift+/', () => setKeyboardShortcutsOpen(true), { enabled: !dialogOpen }, [dialogOpen]);
 
   // Show error state
   if (error) {
@@ -712,7 +663,8 @@ export function ReviewInterface({ layoutVariant = 'dashboard', pivotEnabled = MC
           <div className="text-center">
             <div className="text-lg font-medium text-destructive mb-2">Error Loading Results</div>
             <div className="text-sm text-muted-foreground mb-4">{error}</div>
-            <Button onClick={() => navigate('/')}>
+            <Button onClick={() => void reloadResults()} disabled={resultsQuery.isFetching}>Reload results</Button>
+            <Button variant="outline" onClick={() => navigate('/')}>
               Go to Dashboard
             </Button>
           </div>
@@ -723,6 +675,7 @@ export function ReviewInterface({ layoutVariant = 'dashboard', pivotEnabled = MC
 
   return (
       <Layout title={layoutTitle}>
+          {layoutVariant === 'tool' && <h1 className="sr-only">{layoutTitle}</h1>}
           {isSampleTutorial && samplePreparationActive && (
             <div className="mb-4 border border-[#26D99D] bg-[#26D99D]/16 dark:bg-[#26D99D]/24 p-3">
               <div className="flex items-center gap-2 text-sm font-medium text-[#064731] dark:text-[#E9FFF8]">
@@ -850,7 +803,13 @@ export function ReviewInterface({ layoutVariant = 'dashboard', pivotEnabled = MC
               Step 3-4 of 4: Review results, then export redirect rules. Press <kbd className="mx-1 rounded border border-[#26D99D]/70 px-1 py-0.5 font-semibold">Esc</kbd> to hide hints.
             </div>
           )}
+          {isSaving && <p role="status" className="mb-3 text-sm text-muted-foreground">Saving review changes. Export will be available when saves are confirmed.</p>}
+          {saveError && <div role="alert" className="mb-3 rounded-md border border-destructive p-3 text-sm">
+            <p>{saveError}</p>
+            <Button variant="outline" className="mt-2" onClick={() => void reloadResults()} disabled={isSaving || resultsQuery.isFetching}>Reload results</Button>
+          </div>}
           <ReviewToolbar
+            exportDisabled={!canExport}
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
             confidenceFilter={confidenceFilter}
@@ -859,7 +818,7 @@ export function ReviewInterface({ layoutVariant = 'dashboard', pivotEnabled = MC
             onSortChange={setSortOption}
             showExactMatches={showExactMatches}
             onShowExactMatchesChange={setShowExactMatches}
-            onExportClick={() => setExportModalOpen(true)}
+            onExportClick={() => { if (canExport) setExportModalOpen(true); }}
             totalCount={redirects.length}
             filteredCount={sortedRedirects.length}
             searchInputRef={searchInputRef}
@@ -870,6 +829,7 @@ export function ReviewInterface({ layoutVariant = 'dashboard', pivotEnabled = MC
           {/* Table */}
           <div className="mt-6">
           <RedirectTable
+            actionsDisabled={isSaving || !!saveError}
             redirects={pageRedirects}
             selectedRows={selectedRows}
             expandedRow={expandedRow}
@@ -920,16 +880,16 @@ export function ReviewInterface({ layoutVariant = 'dashboard', pivotEnabled = MC
           </div>
 
           {/* Bottom Controls */}
-          <div className="mt-6 flex items-center justify-between border-t border-border pt-6 bg-card px-6 py-4">
+          <div className="mt-6 flex flex-wrap gap-4 items-center justify-between border-t border-border pt-6 bg-card px-6 py-4">
             <div className="flex items-center gap-4">
-              <Select onValueChange={handleBulkAction}>
-                <SelectTrigger className="w-[200px]">
+              <Select value="" onValueChange={handleBulkAction} disabled={isSaving}>
+                <SelectTrigger aria-label="Bulk Actions" className="w-[200px] data-[placeholder]:text-foreground">
                   <SelectValue placeholder="Bulk Actions" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="approve-all-high">Approve All High</SelectItem>
-                  <SelectItem value="approve-selected">Approve Selected</SelectItem>
-                  <SelectItem value="reject-selected">Reject Selected</SelectItem>
+                  <SelectItem value="approve-all-high" disabled={!!saveError}>Approve All High</SelectItem>
+                  <SelectItem value="approve-selected" disabled={!!saveError}>Approve Selected</SelectItem>
+                  <SelectItem value="reject-selected" disabled={!!saveError}>Reject Selected</SelectItem>
                   <SelectItem value="clear-selection">Clear Selection</SelectItem>
                 </SelectContent>
               </Select>
@@ -998,6 +958,7 @@ export function ReviewInterface({ layoutVariant = 'dashboard', pivotEnabled = MC
             <Button
               variant="outline"
               size="icon"
+              aria-label="Keyboard shortcuts"
               onClick={() => setKeyboardShortcutsOpen(true)}
               className="h-10 w-10 rounded-full shadow-lg border-2"
             >
@@ -1016,14 +977,15 @@ export function ReviewInterface({ layoutVariant = 'dashboard', pivotEnabled = MC
           redirect={editingRow}
           sessionId={sessionId!}
           onSave={handleSaveEdit}
-          onCancel={() => setEditingRow(null)}
+          onCancel={() => { if (!saveLock.current) setEditingRow(null); }}
           pipelineType={pipelineType}
         />
       )}
 
       {/* Export Modal */}
       <ExportModal
-        open={exportModalOpen}
+        sessionId={sessionId!}
+        open={exportModalOpen && canExport}
         onOpenChange={setExportModalOpen}
         onExport={handleExport}
         redirects={redirects}

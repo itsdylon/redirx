@@ -158,7 +158,7 @@ The revised transaction boundary was rehearsed on the restored actual public/aut
 
 The native PostgreSQL runner suite passed15 tests, including later-file rollback of earlier DDL/history, exact-source replay, concurrent legacy insertion blocked before commit, intermediate schema/history invisibility, and aggregate fingerprints detecting edits/duplicates while tolerating additive columns. The fingerprint utility reads all original public tables in one REPEATABLE READ, READ ONLY transaction; individual row contents stay in PostgreSQL. The initial production baseline covers31 public tables and18,568 rows. It is not a data backup or a writer pause; any difference must be investigated.
 
-Run from the reviewed integration checkout using the application virtualenv. The private target file contains only the previously verified host/port/user/database. No DSN goes in argv or output:
+Run from the reviewed integration checkout using the application virtualenv. The private target file contains only the previously verified host/port/user/database. The current CLI also requires a single explicit TCP target and rejects inherited libpq routing; see the [release connection validation follow-up](research/schema-readiness/release-target-validation.md) for required environment cleanup. No DSN goes in argv or output:
 
 ```sh
 python scripts/release/apply_pivot_migrations.py \

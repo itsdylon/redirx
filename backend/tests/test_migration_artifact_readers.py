@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from uuid import UUID
 
-from backend.services.migration_artifact_readers import MigrationArtifactReaders
+from backend.services.migration_artifact_readers import MigrationArtifactReaders, SelectionRevisionConflictError
 from backend.services.migration_repository import MigrationNotFoundError, RepositoryUnavailableError
 
 OWNER = str(UUID("00000000-0000-0000-0000-000000000001"))
@@ -123,18 +123,23 @@ class TestMigrationArtifactReaders(unittest.TestCase):
 
     def test_revision_mismatch_fails_closed(self):
         client = Client([{"selection_revision": 2}])
-        with self.assertRaises(RepositoryUnavailableError):
+        with self.assertRaises(SelectionRevisionConflictError) as caught:
             MigrationArtifactReaders(Repo(client)).get_export_selection(OWNER, MIGRATION, RUN, "1")
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(caught.exception.next_action, 'poll')
 
     def test_same_max_row_revision_counterexample_is_caught_by_run_revision(self):
         client = Client([
             {"selection_revision": 1},
             {"items": [{"mapping_id": "00000000-0000-0000-0000-000000000010", "old_url": "/a", "new_url": "/b", "revision": 1}], "next_cursor": {"observed": False, "clicks": -1, "id": "00000000-0000-0000-0000-000000000010"}},
             {"selection_revision": 1},
+            {"items": [], "next_cursor": None},
             {"selection_revision": 2},
         ])
-        with self.assertRaises(RepositoryUnavailableError):
+        with self.assertRaises(SelectionRevisionConflictError) as caught:
             MigrationArtifactReaders(Repo(client)).get_export_selection(OWNER, MIGRATION, RUN, "1")
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(caught.exception.next_action, 'poll')
 
     def test_quote_grant_requires_owner_active_state_and_completed_session(self):
         run = {"id": RUN, "migration_id": MIGRATION, "user_id": OWNER, "grant_id": "40000000-0000-0000-0000-000000000001", "quote_id": "50000000-0000-0000-0000-000000000001", "legacy_session_id": "60000000-0000-0000-0000-000000000001", "operation_id": "70000000-0000-0000-0000-000000000001", "authorized_attempt": 2}

@@ -47,6 +47,47 @@ class TestPathHandling(unittest.TestCase):
         self.assertEqual(rx.rehost("https://old.com/a", "new.com"), "https://new.com/a")
 
 
+class TestRawSuffixAndRuntimeLimits(unittest.TestCase):
+    def test_raw_destination_suffix_and_empty_delimiters_survive_transforms(self):
+        for suffix in ('/Case%2FPath;view?Q=A%2FB#Section', '/a?#', '/a?', '/a#', '?', '#section'):
+            with self.subTest(suffix=suffix):
+                raw = 'HTTPS://old.example' + suffix
+                self.assertEqual(rx.to_path(raw), suffix if suffix.startswith('/') else '/' + suffix)
+                self.assertEqual(rx.rehost(raw, 'https://new.example'), 'https://new.example' + suffix)
+
+    def test_same_origin_target_fragment_is_not_silently_dropped(self):
+        rows = [{'old_url': 'https://same.example/old', 'new_url': 'https://same.example/new?x=1#section'}]
+        for fmt in rx.FORMATS:
+            with self.subTest(fmt=fmt):
+                self.assertIn('/new?x=1#section', rx.build_export(rows, fmt))
+
+    def test_empty_query_is_not_a_no_op_or_dropped_in_data_exports(self):
+        rows = [{'old_url': 'https://same.example/a', 'new_url': 'https://same.example/a?'}]
+        result = rx.select_export_mappings(rows)
+        self.assertEqual(result['included_count'], 1)
+        self.assertEqual(result['mappings'][0]['new_rendered'], '/a?')
+        self.assertIn('/a?', rx.build_export(rows, rx.CSV_FORMAT))
+
+    def test_normalized_server_matchers_refuse_raw_identity_loss(self):
+        for fmt in (rx.APACHE, rx.NGINX):
+            for source in ('/a%20b', '/a%2Fb', '/%61bc', '/a//b', '/a/../b', '/a/./b'):
+                with self.subTest(fmt=fmt, source=source), self.assertRaises(rx.UnsupportedExportInput):
+                    rx.build_export([{'old_url': source, 'new_url': '/destination'}], fmt)
+
+    def test_source_fragments_and_empty_queries_are_explicitly_unsupported(self):
+        for fmt in rx.FORMATS:
+            if fmt not in (rx.CSV_FORMAT, rx.JSON_FORMAT):
+                with self.subTest(fmt=fmt), self.assertRaises(rx.UnsupportedExportInput):
+                    rx.build_export([{'old_url': '/a#section', 'new_url': '/destination'}], fmt)
+        for fmt in rx.PATH_ONLY_FORMATS:
+            with self.subTest(fmt=fmt), self.assertRaises(rx.UnsupportedExportInput):
+                rx.build_export([{'old_url': '/a?', 'new_url': '/destination'}], fmt)
+        for fmt in (rx.CSV_FORMAT, rx.JSON_FORMAT):
+            for source in ('/a#section', '/a?', '/a%2Fb'):
+                with self.subTest(fmt=fmt, source=source):
+                    self.assertIn(source, rx.build_export([{'old_url': source, 'new_url': '/destination'}], fmt))
+
+
 class TestFormats(unittest.TestCase):
     def test_apache(self):
         out = rx.build_export(ROWS, rx.APACHE)
@@ -68,7 +109,16 @@ class TestFormats(unittest.TestCase):
 
     def test_wordpress_rows_carry_the_status(self):
         out = rx.build_export(ROWS, rx.WORDPRESS)
-        self.assertEqual(out.splitlines()[0], "/about-us,https://new.example.com/company/about,301")
+        self.assertEqual(out.splitlines()[0], "/about-us,https://new.example.com/company/about,0,301,url")
+
+    def test_wordpress_import_columns_keep_literal_regex_and_quoted_urls(self):
+        import csv
+        import io
+        out = rx.build_export([{'old_url': 'https://old.example/a,b.*', 'new_url': 'https://new.example/d,e'}], rx.WORDPRESS)
+        row = next(csv.reader(io.StringIO(out)))
+        source, target, regex, http_code, match_type = row
+        self.assertEqual((source, target), ('/a,b.*', 'https://new.example/d,e'))
+        self.assertEqual((regex, http_code, match_type), ('0', '301', 'url'))
 
     def test_vercel_is_valid_json_with_permanent_true(self):
         parsed = json.loads(rx.build_export(ROWS, rx.VERCEL))
@@ -85,6 +135,24 @@ class TestFormats(unittest.TestCase):
     def test_shopify_has_its_required_header(self):
         out = rx.build_export(ROWS, rx.SHOPIFY)
         self.assertEqual(out.splitlines()[0], "Redirect from,Redirect to")
+
+    def test_cloudflare_static_rule_count_limit_is_checked_after_selection(self):
+        rows = [{'old_url': f'/old-{i}', 'new_url': f'/new-{i}'} for i in range(2001)]
+        self.assertEqual(len(rx.build_export(rows[:2000], rx.CLOUDFLARE).splitlines()), 2000)
+        with self.assertRaisesRegex(rx.UnsupportedExportInput, '2,000 static'):
+            rx.build_export(rows, rx.CLOUDFLARE)
+        rows[-1]['approved'] = False
+        self.assertEqual(len(rx.build_export(rows, rx.CLOUDFLARE).splitlines()), 2000)
+
+    def test_cloudflare_rule_character_limit_is_not_silently_truncated(self):
+        # '/a ' + destination + ' 301' is exactly 1,000 characters.
+        destination = '/' + 'b' * 992
+        row = {'old_url': '/a', 'new_url': destination}
+        self.assertEqual(len(rx.build_export([row], rx.CLOUDFLARE)), 1000)
+        row['new_url'] += 'b'
+        with self.assertRaisesRegex(rx.UnsupportedExportInput, '1,000 characters'):
+            rx.build_export([row], rx.CLOUDFLARE)
+        self.assertIn(row['new_url'], rx.build_export([row], rx.JSON_FORMAT))
 
     def test_csv_has_a_header(self):
         out = rx.build_export(ROWS, rx.CSV_FORMAT)

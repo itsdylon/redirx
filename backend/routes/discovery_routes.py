@@ -51,6 +51,11 @@ def discover():
     # indexed yet, so GSC would return nothing there.
     side = "old" if str(body.get("side") or "old").lower() == "old" else "new"
 
+    use_gsc = body.get("use_gsc", True)
+    if type(use_gsc) is not bool:
+        return jsonify({"success": False, "code": "invalid_use_gsc",
+                        "error": "use_gsc must be true or false."}), 400
+
     user_id = str(request.user.id)
     plan = UserQuotaDB().get_plan(user_id)
     max_urls = (
@@ -71,6 +76,7 @@ def discover():
             max_urls=max_urls,
             time_budget=Config.DISCOVERY_TIME_BUDGET_SECONDS,
             gsc_property_override=gsc_property,
+            use_gsc=use_gsc,
         ))
     except DiscoveryError as e:
         return jsonify({

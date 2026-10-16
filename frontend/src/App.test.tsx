@@ -120,8 +120,9 @@ describe('App routing', () => {
 
   it('does not expose /start route', () => {
     mockUseAuth.mockReturnValue({ user: null, loading: false });
-    const { container } = renderAt('/start');
-    expect(container).toBeEmptyDOMElement();
+    renderAt('/start');
+    expect(screen.getByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Sign in to RedirX' })).toHaveAttribute('href', '/login');
   });
 
   it('redirects tool users away from /upload', async () => {
@@ -292,4 +293,11 @@ describe('current billing access', () => {
     renderAt('/billing/current/return?checkout_id=c1', pivotEnabled);
     expect(await screen.findByText('Verified Checkout Return')).toBeInTheDocument();
   });
+});
+
+it('offers the authenticated home for unknown links without reviving retired routes', () => {
+  mockUseAuth.mockReturnValue({ user: { id: 'u1', plan: 'free' }, loading: false });
+  renderAt('/missing-link', true);
+  expect(screen.getByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
+  expect(screen.getByRole('link', { name: 'Return to your workspace' })).toHaveAttribute('href', '/companion');
 });

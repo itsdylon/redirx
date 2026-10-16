@@ -7,7 +7,7 @@ This ensures email failures never block critical paths (login, job processing, e
 
 import logging
 import os
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from typing import Optional, Dict, Any
 
 import resend
@@ -15,11 +15,22 @@ from jinja2 import Environment, FileSystemLoader
 
 from redirx.config import Config
 from redirx.database import SupabaseClient
+from .email_preferences import unsubscribe_token, UnsubscribeUnavailable
 
 logger = logging.getLogger(__name__)
 
 # Template directory relative to this file
 _TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates", "email")
+
+
+class EmailPreferenceUnavailable(RuntimeError):
+    """An optional send must wait until preference authority can be read."""
+
+
+def accepted_message_id(result: Any) -> Optional[str]:
+    """Provider acceptance requires a real, bounded ID, not a truthy response."""
+    value = result.get("id") if isinstance(result, dict) else getattr(result, "id", None)
+    return value if isinstance(value, str) and value.strip() == value and 0 < len(value) <= 256 else None
 
 
 class EmailType:
@@ -66,7 +77,7 @@ class EmailService:
         skip_preference_check: bool = False,
     ) -> Optional[str]:
         """
-        Render and send an email. Returns the Resend message ID on success, None on failure.
+        Render and send an email. Returns an accepted Resend message ID, or None. Acceptance is not delivery.
 
         Never raises — all errors are caught and logged.
         """
@@ -89,7 +100,7 @@ class EmailService:
             # Build context
             ctx = {
                 "app_url": self._app_url,
-                "unsubscribe_url": self._unsubscribe_url(user_id, email_type) if user_id else None,
+                "unsubscribe_url": self._unsubscribe_url(user_id, email_type) if user_id and email_type not in EmailType.MANDATORY_TYPES else None,
                 **(context or {}),
             }
 
@@ -99,6 +110,8 @@ class EmailService:
             headers: Dict[str, str] = {}
             if ctx.get("unsubscribe_url"):
                 headers["List-Unsubscribe"] = f"<{ctx['unsubscribe_url']}>"
+                if ctx["unsubscribe_url"].startswith("https://") and "/api/email/unsubscribe?token=" in ctx["unsubscribe_url"]:
+                    headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
             params: Dict[str, Any] = {
                 "from": self._from_address,
@@ -110,23 +123,23 @@ class EmailService:
                 params["headers"] = headers
 
             result = resend.Emails.send(params)
-            message_id = result.get("id") if isinstance(result, dict) else getattr(result, "id", None)
+            message_id = accepted_message_id(result)
+            if message_id is None:
+                self._log_send(user_id, to_email, email_type, subject,
+                               status="failed", error="provider_acknowledgment_missing")
+                logger.warning("Email provider did not acknowledge acceptance: %s", email_type)
+                return None
 
             self._log_send(user_id, to_email, email_type, subject, resend_message_id=message_id)
-            logger.info(f"Email sent: {email_type} -> {to_email} (id={message_id})")
+            logger.info(f"Email accepted: {email_type} -> {to_email} (id={message_id})")
             return message_id
 
-        except Exception:
-            import traceback
-            err = traceback.format_exc()
-            logger.exception(f"Email send failed: {email_type} -> {to_email}")
-            try:
-                self._log_send(
-                    user_id, to_email, email_type, subject,
-                    status="failed", error=err[:2000],
-                )
-            except Exception:
-                pass
+        except Exception as error:
+            # Do not persist provider payloads, addresses or secrets from an
+            # exception. The caller receives None and retains its retry guard.
+            code = "preference_lookup_unavailable" if isinstance(error, EmailPreferenceUnavailable) else "email_send_failed"
+            logger.warning("Email attempt not accepted: %s (%s)", email_type, code)
+            self._log_send(user_id, to_email, email_type, subject, status="failed", error=code)
             return None
 
     # ------------------------------------------------------------------
@@ -188,18 +201,17 @@ class EmailService:
         """
         Report newly-detected redirect problems on a live site.
 
-        The subject line leads with traffic where we know it: this arrives in
-        an inbox competing with everything else, and the number that decides
-        whether it gets opened today is how much traffic is bleeding.
+        Baseline clicks prioritize findings; they do not measure current lost
+        traffic or prove that a warning is a broken redirect.
         """
         if clicks_at_risk:
             subject = (
-                f"{total_issues} broken redirect{'' if total_issues == 1 else 's'} "
-                f"on {domain} — {clicks_at_risk:,} monthly clicks at risk"
+                f"{total_issues} redirect finding{'' if total_issues == 1 else 's'} "
+                f"on {domain} — {clicks_at_risk:,} recorded clicks on affected pages"
             )
         else:
             subject = (
-                f"{total_issues} broken redirect{'' if total_issues == 1 else 's'} on {domain}"
+                f"{total_issues} redirect finding{'' if total_issues == 1 else 's'} on {domain}"
             )
 
         return self.send_email(
@@ -274,7 +286,13 @@ class EmailService:
     # ------------------------------------------------------------------
 
     def _unsubscribe_url(self, user_id: str, email_type: str) -> str:
-        return f"{self._app_url}/api/email/unsubscribe?user_id={user_id}&type={email_type}"
+        try:
+            token = unsubscribe_token(user_id, email_type)
+        except UnsubscribeUnavailable:
+            # Existing authenticated settings remain usable during missing
+            # signing configuration; never mint a predictable public token.
+            return f"{self._app_url}/settings?tab=notifications"
+        return f"{self._app_url}/api/email/unsubscribe?{urlencode({'token': token})}"
 
     def _is_opted_out(self, user_id: str, email_type: str) -> bool:
         try:
@@ -287,12 +305,15 @@ class EmailService:
                 .maybe_single()
                 .execute()
             )
-            if result and result.data:
-                return result.data.get("opted_out", False)
-            return False
-        except Exception:
-            logger.exception("Failed to check email preferences")
-            return False
+            if result is None or getattr(result, "error", None) is not None or not hasattr(result, "data"):
+                raise EmailPreferenceUnavailable("Preference lookup returned no response")
+            if result.data is None:
+                return False  # Successful lookup, no saved opt-out.
+            if not isinstance(result.data, dict) or type(result.data.get("opted_out")) is not bool:
+                raise EmailPreferenceUnavailable("Preference lookup returned invalid data")
+            return result.data["opted_out"]
+        except Exception as error:
+            raise EmailPreferenceUnavailable("Could not verify email preferences") from error
 
     def _log_send(
         self,

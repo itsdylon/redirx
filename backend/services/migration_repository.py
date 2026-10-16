@@ -159,11 +159,10 @@ def _row_ids(table: str, row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _rows(result: Any) -> list[dict[str, Any]]:
+    # Only normal table SELECTs call this helper (never single/maybe_single,
+    # count-only or scalar RPC responses). Absence is an explicit empty array;
+    # null/missing/object responses cannot establish an empty owned result.
     data = getattr(result, "data", None)
-    if data is None:
-        return []
-    if isinstance(data, Mapping):
-        return [dict(data)]
     if isinstance(data, list):
         if not all(isinstance(row, Mapping) for row in data):
             raise RepositoryUnavailableError("Migration data is temporarily unavailable.")

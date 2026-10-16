@@ -74,6 +74,29 @@ describe('opt-in pivot MCP tools', () => {
     } finally { await close(); }
   });
 
+  it('makes first-use guidance discoverable through native initialize and resources without fetching', async () => {
+    const { client, close } = await connected();
+    try {
+      expect(client.getInstructions()).toContain('redirx://guides/first-migration');
+      expect(client.getInstructions()).toContain('explicit user approval');
+      expect(client.getServerCapabilities()).toHaveProperty('resources');
+      const tools = (await client.listTools()).tools;
+      const plan = tools.find(tool => tool.name === 'plan_migration')!;
+      expect((plan.inputSchema.properties!.old_site as { description: string }).description).toContain('source pages');
+      const intake = tools.find(tool => tool.name === 'import_inventory')!;
+      expect((intake.inputSchema.properties!.urls as { description: string }).description).toContain('not a sitemap file URL');
+      expect((await client.listResources()).resources).toEqual([expect.objectContaining({
+        uri: 'redirx://guides/first-migration', mimeType: 'text/markdown',
+      })]);
+      const guide = await client.readResource({ uri: 'redirx://guides/first-migration' });
+      const text = (guide.contents[0] as { text: string }).text;
+      expect(text).toContain('not a claim of full site coverage');
+      expect(text).toContain('same input and idempotency key');
+      expect(text).toContain('sitemap file URL');
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { await close(); }
+  });
+
   it('imports explicit URL strings through the owned durable API without a crawler or URL fetch', async () => {
     fetchMock.mockImplementation(async () => new Response(JSON.stringify(envelope({ inventory: { id: ids.run, status: 'complete' } })), { headers: { 'content-type': 'application/json' } }));
     const { client, close } = await connected();
@@ -161,6 +184,7 @@ describe('opt-in pivot MCP tools', () => {
     config.pivotEnabled = false;
     const { client, close } = await connected();
     try {
+      expect(client.getInstructions()).toBeUndefined();
       expect((await client.listTools()).tools.map(tool => tool.name).sort()).toEqual(['deep_match', 'discover', 'export', 'get_more_tools', 'preview']);
     } finally {
       config.pivotEnabled = true;
@@ -309,6 +333,151 @@ describe('opt-in pivot MCP tools', () => {
       await vi.waitFor(() => expect(telemetry.capture).toHaveBeenCalledWith(expect.objectContaining({
         event: '$mcp_tool_call', distinctId: 'account-a', properties: expect.objectContaining({ $mcp_intent: context, $mcp_tool_name: 'verify_redirects' }),
       })));
+    } finally { await close(); }
+  });
+
+  it('advertises structured envelopes while retaining byte-compatible JSON text', async () => {
+    const expected = envelope({ run_id: ids.run }, { status: 'queued', next_action: 'poll', retry_after_seconds: 10 });
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(expected)));
+    const { client, close } = await connected();
+    try {
+      const tools = (await client.listTools()).tools;
+      expect(tools.every(tool => tool.outputSchema?.properties?.data)).toBe(true);
+      const result = await client.callTool({ name: 'get_migration', arguments: { migration_id: ids.migration } });
+      expect(result.structuredContent).toEqual(expected);
+      expect(JSON.parse((result.content[0] as { text: string }).text)).toEqual(result.structuredContent);
+    } finally { await close(); }
+  });
+
+  it('flags failed business outcomes but retains recovery state and per-row partial outcomes', async () => {
+    const failure = envelope({ selection_revision: 3 }, { status: 'failed', next_action: 'resolve_matches', error: {
+      code: 'revision_conflict', message: 'Refresh matches.', retryable: false, next_action: 'resolve_matches', details: { mapping_id: ids.mapping },
+    } });
+    const partial = envelope({ outcomes: [{ mapping_id: ids.mapping, status: 'conflict' }], selection_revision: 4 }, { status: 'partial', next_action: 'resolve_matches' });
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(failure), { status: 409 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(partial)));
+    const { client, close } = await connected();
+    try {
+      const args = { migration_id: ids.migration, run_id: ids.run, idempotency_key: 'decision', decisions: [{ mapping_id: ids.mapping, expected_revision: 2, action: 'defer' }] };
+      const failed = await client.callTool({ name: 'resolve_matches', arguments: args });
+      expect(failed.isError).toBe(true);
+      expect(failed.structuredContent).toEqual(failure);
+      const result = await client.callTool({ name: 'resolve_matches', arguments: { ...args, idempotency_key: 'other-decision' } });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toEqual(partial);
+    } finally { await close(); }
+  });
+
+  it('provides safe unknown-outcome recovery after a lost mutation response', async () => {
+    fetchMock.mockRejectedValueOnce(new Error('credential=never-show-this'));
+    const { client, close } = await connected();
+    try {
+      const result = await client.callTool({ name: 'plan_migration', arguments: {
+        old_site: 'https://old.test', new_site: 'https://new.test', idempotency_key: 'retain-this-key',
+      } });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({ status: 'failed', next_action: 'retry', error: { retryable: true } });
+      expect(JSON.stringify(result)).toContain('same idempotency key');
+      expect(JSON.stringify(result)).not.toContain('credential');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally { await close(); }
+  });
+
+  it('carries planning, corrected imports and paginated explicit review into an approved artifact journey', async () => {
+    const oldUrl = 'https://old.test/Case%2FPath?x=One&x=two';
+    const target = 'https://new.test/Keep%2FCase?x=Two';
+    const artifact = '44444444-4444-4444-8444-444444444444';
+    const replies = [
+      envelope({}, { next_action: 'provide_inventory', status: 'needs_input' }),
+      envelope({ inventory: { id: ids.mapping, status: 'partial', input_issues: {
+        total_excluded: 1, reason_counts: { undeclared_origin: 1 },
+        examples: [{ code: 'undeclared_origin', url_hint: 'https://foreign.test/a' }],
+      } } }, { next_action: 'provide_inventory', status: 'partial' }),
+      envelope({ inventory: { id: ids.mapping, status: 'complete' } }, { next_action: 'provide_inventory' }),
+      envelope({ inventory: { id: artifact, status: 'complete' } }, { next_action: 'run_migration' }),
+      envelope({ run_id: ids.run }, { status: 'queued', next_action: 'poll', retry_after_seconds: 10 }),
+      envelope({ run_id: ids.run, jev: { seed_revision: 7 } }, { next_action: 'resolve_matches' }),
+      envelope({ items: [{ mapping_id: ids.mapping, old_url: oldUrl, revision: 2, new_url: target }], next_cursor: 'opaque+/=', selection_revision: 9 }),
+      envelope({ items: [], next_cursor: null, selection_revision: 9 }),
+      envelope({ outcomes: [{ mapping_id: ids.mapping, status: 'applied' }], selection_revision: 10 }),
+      envelope({ artifact_id: artifact }, { next_action: 'install_artifact' }),
+      envelope({ resource_type: 'artifact_download', migration_id: ids.migration, artifact_id: artifact, format: 'json', content: JSON.stringify([{ old_url: oldUrl, new_url: target }]) }),
+    ];
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify(replies.shift())));
+    const { client, close } = await connected();
+    try {
+      await client.callTool({ name: 'plan_migration', arguments: { old_site: 'https://old.test', new_site: 'https://new.test', idempotency_key: 'plan-stable' } });
+      const partial = await client.callTool({ name: 'import_inventory', arguments: {
+        migration_id: ids.migration, side: 'old', urls: [oldUrl, 'https://foreign.test/a'], idempotency_key: 'old-original',
+      } });
+      expect(partial.structuredContent).toMatchObject({ status: 'partial', next_action: 'provide_inventory',
+        data: { inventory: { input_issues: { total_excluded: 1 } } } });
+      // The user corrects the intended scope; the gateway never drops rows itself.
+      await client.callTool({ name: 'import_inventory', arguments: { migration_id: ids.migration,
+        side: 'old', urls: [oldUrl], idempotency_key: 'old-corrected' } });
+      await client.callTool({ name: 'import_inventory', arguments: { migration_id: ids.migration,
+        side: 'new', urls: [target], idempotency_key: 'new-original' } });
+      expect(fetchMock).toHaveBeenCalledTimes(4); // imports did not start a run
+      const queued = await client.callTool({ name: 'run_migration', arguments: { migration_id: ids.migration,
+        old_inventory_id: ids.mapping, new_inventory_id: artifact, idempotency_key: 'run-stable' } });
+      expect(queued.structuredContent).toMatchObject({ status: 'queued', retry_after_seconds: 10 });
+      expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ side: 'old', rows: [oldUrl], idempotency_key: 'old-corrected' });
+      expect(JSON.parse(fetchMock.mock.calls[4][1].body).inventory_ids).toEqual({ old: ids.mapping, new: artifact });
+      const state = await client.callTool({ name: 'get_migration', arguments: { migration_id: ids.migration, run_id: ids.run } });
+      expect(state.structuredContent).toMatchObject({ next_action: 'resolve_matches', data: { jev: { seed_revision: 7 } } });
+      const first = await client.callTool({ name: 'list_matches', arguments: { migration_id: ids.migration, run_id: ids.run, filter: 'needs_review', limit: 1 } });
+      expect(first.structuredContent).toMatchObject({ data: { items: [{ old_url: oldUrl }], selection_revision: 9 } });
+      const last = await client.callTool({ name: 'list_matches', arguments: { migration_id: ids.migration, run_id: ids.run, filter: 'needs_review', limit: 1, cursor: 'opaque+/=' } });
+      expect(last.structuredContent).toMatchObject({ data: { next_cursor: null } });
+      expect(new URL(fetchMock.mock.calls[7][0]).searchParams.get('cursor')).toBe('opaque+/=');
+      // Fixture represents an explicit user decision; no match confidence is
+      // converted into approval by any gateway callback.
+      const reviewed = await client.callTool({ name: 'resolve_matches', arguments: { migration_id: ids.migration, run_id: ids.run, idempotency_key: 'explicit-review', decisions: [{ mapping_id: ids.mapping, expected_revision: 2, action: 'set_target', target_url: target }] } });
+      expect(reviewed.structuredContent).toMatchObject({ data: { selection_revision: 10 } });
+      const exported = await client.callTool({ name: 'export_redirects', arguments: { migration_id: ids.migration, run_id: ids.run, format: 'json', revision: 10, idempotency_key: 'export-reviewed' } });
+      expect(exported.structuredContent).toMatchObject({ next_action: 'install_artifact' });
+      const downloaded = await client.readResource({ uri: `redirx://migrations/${ids.migration}/artifacts/${artifact}` });
+      expect(JSON.parse((downloaded.contents[0] as { text: string }).text)).toEqual([{ old_url: oldUrl, new_url: target }]);
+      expect(JSON.parse(fetchMock.mock.calls[8][1].body).decisions[0]).toEqual({ mapping_id: ids.mapping, expected_revision: 2, action: 'set_target', target_url: target });
+      expect(JSON.parse(fetchMock.mock.calls[9][1].body)).toMatchObject({ revision: 10, allow_partial: false });
+      expect(fetchMock).toHaveBeenCalledTimes(11);
+      expect(replies).toHaveLength(0);
+    } finally { await close(); }
+  });
+
+  it('recovers a committed run after a lost response using status and the original key', async () => {
+    const args = { migration_id: ids.migration, old_inventory_id: ids.mapping,
+      new_inventory_id: '44444444-4444-4444-8444-444444444444', idempotency_key: 'keep-run-key' };
+    const saved = new Map<string, string>();
+    let reservations = 0;
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      if (init.method === 'POST') {
+        const body = JSON.parse(init.body as string);
+        const prior = saved.get(body.idempotency_key);
+        if (!prior) {
+          saved.set(body.idempotency_key, JSON.stringify(body));
+          reservations++;
+          throw new Error('fixture response lost after commit');
+        }
+        expect(JSON.stringify(body)).toBe(prior);
+        return new Response(JSON.stringify(envelope({ run_id: ids.run, replayed: true }, { status: 'queued', next_action: 'poll' })));
+      }
+      expect(url).toBe(`https://backend.test/api/v2/migrations/${ids.migration}`);
+      return new Response(JSON.stringify(envelope({ run_id: ids.run }, { status: 'queued', next_action: 'poll', retry_after_seconds: 10 })));
+    });
+    const { client, close } = await connected();
+    try {
+      const uncertain = await client.callTool({ name: 'run_migration', arguments: args });
+      expect(uncertain.isError).toBe(true);
+      expect(JSON.stringify(uncertain)).toContain('The mutation may have completed');
+      expect(JSON.stringify(uncertain)).toContain('same idempotency key');
+      expect(fetchMock).toHaveBeenCalledTimes(1); // no automatic retry
+      const status = await client.callTool({ name: 'get_migration', arguments: { migration_id: ids.migration } });
+      expect(status.structuredContent).toMatchObject({ data: { run_id: ids.run } });
+      const replay = await client.callTool({ name: 'run_migration', arguments: args });
+      expect(replay.structuredContent).toMatchObject({ data: { run_id: ids.run, replayed: true } });
+      expect(reservations).toBe(1); // stub authority, not a substitute for SQL idempotency tests
+      expect(fetchMock).toHaveBeenCalledTimes(3);
     } finally { await close(); }
   });
 

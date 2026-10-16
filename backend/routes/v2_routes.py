@@ -92,7 +92,7 @@ def repository_error(exc):
             error={'code': exc.code, 'message': str(exc), 'retryable': False, 'next_action': 'approve_extra_urls'})), 409
     code = 'operation_conflict' if exc.code == 'inventory_busy' else exc.code
     http_status = {'not_found': 404, 'invalid_input': 400, 'operation_conflict': 409,
-                   'capacity_exceeded': 413, 'quote_expired': 409,
+                   'capacity_exceeded': 413, 'quote_expired': 409, 'revision_conflict': 409,
                    'inventory_incomplete': 409, 'payment_required': 402, 'approval_required': 409}.get(code, 503)
     return failure(code, str(exc), http_status, exc.retryable,
                    getattr(exc, 'next_action', 'retry' if exc.retryable else 'none'))

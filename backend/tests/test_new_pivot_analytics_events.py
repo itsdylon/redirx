@@ -179,6 +179,16 @@ class RunCompletedTests(unittest.TestCase):
         self.assertEqual(kwargs["migration_id"], MIGRATION)
         self.assertEqual(kwargs["properties"]["engine"], "deep_match")
 
+    def test_different_observed_terminal_outcome_is_not_this_requests_completion(self):
+        job = self._job()
+        service = self._service(job, pre_status="processing")
+        service.repository.client.rpc.return_value.execute.return_value.data['status'] = 'failed'
+        with patch("backend.services.migration_run_service.capture") as capture, \
+             patch("backend.services.migration_run_service._activation", return_value="test_only"):
+            result = service.finalize_session(job, "worker-1", "completed")
+        self.assertEqual(result['status'], 'failed')
+        capture.assert_not_called()
+
     def test_does_not_fire_again_for_an_already_terminal_session(self):
         # The retried-worker-call scenario: finalize_migration_run_session's
         # early-return branch would return the same JSON shape either way.

@@ -7,13 +7,12 @@ summary, OAuth state tokens) — no network or database access.
 import sys
 import os
 import unittest
+from unittest.mock import patch
 
 # Add parent directory to path
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 sys.path.insert(0, BASE_DIR)
 sys.path.insert(0, os.path.join(BASE_DIR, "src"))
-
-os.environ.setdefault("GSC_STATE_SECRET", "test-secret")
 
 from backend.services.gsc_service import (
     GSCError,
@@ -109,6 +108,12 @@ class TestPropertyMatching(unittest.TestCase):
 
 
 class TestStateTokens(unittest.TestCase):
+    def setUp(self):
+        from src.redirx.config import Config
+        signing = patch.object(Config, 'GSC_STATE_SECRET', 'fixture-only-state-signing-key-0000000000')
+        signing.start()
+        self.addCleanup(signing.stop)
+
     def test_round_trip(self):
         token = create_state_token("user-123", "/review/abc")
         payload = verify_state_token(token)

@@ -123,7 +123,7 @@ describe('ReviewInterface regression', () => {
     renderReviewPage();
 
     await waitFor(() => {
-      expect(mockGetResults).toHaveBeenCalledWith('session-1');
+      expect(mockGetResults).toHaveBeenCalledWith('session-1', expect.any(AbortSignal));
     });
 
     expect(screen.queryByText('Navigate back to previous projects or return to the main tool page.')).not.toBeInTheDocument();
@@ -150,7 +150,7 @@ describe('ReviewInterface regression', () => {
     mockGetResults.mockResolvedValue({ success: true, session: { id: 'session-1', pipeline_type: 'url_only' }, mappings: [] });
     mockGetProjectUnlockStatus.mockResolvedValue({ has_quote: !!quoteStatus, is_unlocked: false, quote_status: quoteStatus });
     renderReviewPage(true);
-    await waitFor(() => expect(mockGetProjectUnlockStatus).toHaveBeenCalledWith('session-1'));
+    await waitFor(() => expect(mockGetProjectUnlockStatus).toHaveBeenCalledWith('session-1', expect.any(AbortSignal)));
     if (quoteStatus) expect(await screen.findByText(/Waiting for confirmation and deep-run queueing/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Unlock Deep Match' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'View Project Pricing' })).not.toBeInTheDocument();

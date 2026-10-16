@@ -1,5 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useProjectActions } from './history/useProjectActions';
+import { DeleteProjectDialog } from './history/DeleteProjectDialog';
+import { MCP_PIVOT_ENABLED } from '../api/config';
+import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { usePostHog } from '@posthog/react';
 import { DashboardLayout } from './DashboardLayout';
@@ -7,64 +10,53 @@ import { ToolLayout } from './ToolLayout';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
 import { Clock, Pencil, Check, X, Loader2, Trash2, Search, ArrowLeft } from 'lucide-react';
-import { fetchAllSessions, updateSessionName, deleteSession, type MigrationSession } from '../api/sessions';
-import { DashboardData } from '../api/dashboard';
+import { fetchSessionPage } from '../api/sessions';
 import { formatDate } from '../utils/date';
-import { toast } from 'sonner';
 import { queryKeys } from '../queries/queryKeys';
 import { handleUnauthorizedAndRedirect } from '../queries/auth';
 import { useAuth } from '../contexts/AuthContext';
 import { isAgencyPlan } from '../lib/plans';
 
 export function AllProjects() {
+  const { user } = useAuth();
+  if (!user) return null;
+  return <AllProjectsContent key={user.id} ownerId={user.id} />;
+}
+
+function AllProjectsContent({ ownerId }: { ownerId: string }) {
   const navigate = useNavigate();
   const posthog = usePostHog();
   const { user } = useAuth();
-  const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = useState('');
+  const [appliedSearch, setAppliedSearch] = useState('');
+  const [cursors, setCursors] = useState<Array<string | null>>([null]);
+  const cursor = cursors[cursors.length - 1];
+  const pageSize = 50;
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
-  const [deletedSessionCache, setDeletedSessionCache] = useState<MigrationSession | null>(null);
-  const undoTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const agencyUser = isAgencyPlan(user?.plan);
-  const pageTitle = agencyUser ? 'All Projects' : 'Project History';
-  const Layout = agencyUser ? DashboardLayout : ToolLayout;
+  const pageTitle = agencyUser && !MCP_PIVOT_ENABLED ? 'All Projects' : 'Project History';
+  const Layout = agencyUser && !MCP_PIVOT_ENABLED ? DashboardLayout : ToolLayout;
 
   const sessionsQuery = useQuery({
-    queryKey: queryKeys.sessions.all,
-    queryFn: fetchAllSessions,
+    queryKey: queryKeys.sessions.page(ownerId, appliedSearch, cursor, pageSize),
+    queryFn: ({ signal }) => fetchSessionPage({ search: appliedSearch, cursor, limit: pageSize }, signal),
+    retry: false,
   });
 
   const sessions = sessionsQuery.data?.sessions || [];
   const loading = sessionsQuery.isLoading;
   const error = sessionsQuery.error instanceof Error ? sessionsQuery.error.message : '';
 
-  const filteredSessions = useMemo(() => {
-    if (searchQuery.trim() === '') {
-      return sessions;
-    }
-
-    const query = searchQuery.toLowerCase();
-    return sessions.filter((session) =>
-      (session.project_name || 'Untitled Session').toLowerCase().includes(query) ||
-      session.status.toLowerCase().includes(query) ||
-      (session.pipeline_type || '').toLowerCase().includes(query)
-    );
-  }, [searchQuery, sessions]);
-
-  const updateSessionsCache = (
-    updater: (currentSessions: MigrationSession[]) => MigrationSession[]
-  ) => {
-    queryClient.setQueryData<{ sessions: MigrationSession[] }>(queryKeys.sessions.all, (current) => {
-      if (!current) return current;
-      return { ...current, sessions: updater(current.sessions) };
-    });
-
-    queryClient.setQueryData<DashboardData>(queryKeys.dashboard.summary, (current) => {
-      if (!current) return current;
-      return { ...current, recent_sessions: updater(current.recent_sessions as MigrationSession[]) };
-    });
+  const firstPage = () => {
+    setCursors([null]);
+    if (cursor === null) void sessionsQuery.refetch();
+  };
+  const searchHistory = () => {
+    const nextSearch = searchQuery.trim();
+    setAppliedSearch(nextSearch); setCursors([null]);
+    if (nextSearch === appliedSearch && cursor === null) void sessionsQuery.refetch();
   };
 
   useEffect(() => {
@@ -80,116 +72,9 @@ export function AllProjects() {
     });
   }, [posthog, user?.plan]);
 
-  const updateSessionNameMutation = useMutation({
-    mutationFn: ({ sessionId, projectName }: { sessionId: string; projectName: string }) =>
-      updateSessionName(sessionId, projectName),
-    onMutate: async ({ sessionId, projectName }) => {
-      await Promise.all([
-        queryClient.cancelQueries({ queryKey: queryKeys.sessions.all }),
-        queryClient.cancelQueries({ queryKey: queryKeys.dashboard.summary }),
-      ]);
-
-      const previousSessions = queryClient.getQueryData<{ sessions: MigrationSession[] }>(queryKeys.sessions.all);
-      const previousDashboard = queryClient.getQueryData<DashboardData>(queryKeys.dashboard.summary);
-
-      updateSessionsCache((currentSessions) =>
-        currentSessions.map((session) =>
-          session.id === sessionId ? { ...session, project_name: projectName } : session
-        )
-      );
-
-      return { previousSessions, previousDashboard };
-    },
-    onError: (mutationError, _variables, context) => {
-      if (context?.previousSessions) {
-        queryClient.setQueryData(queryKeys.sessions.all, context.previousSessions);
-      }
-      if (context?.previousDashboard) {
-        queryClient.setQueryData(queryKeys.dashboard.summary, context.previousDashboard);
-      }
-
-      if (!handleUnauthorizedAndRedirect(mutationError, navigate)) {
-        console.error('Failed to update session name:', mutationError);
-        toast.error('Failed to update project name. Please try again.');
-      }
-    },
-    onSuccess: () => {
-      setEditingSessionId(null);
-      setEditingName('');
-      toast.success('Project name updated');
-    },
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.dashboard.summary });
-    },
-  });
-
-  const deleteSessionMutation = useMutation({
-    mutationFn: ({ sessionId }: { sessionId: string }) => deleteSession(sessionId),
-    onMutate: async ({ sessionId }) => {
-      await Promise.all([
-        queryClient.cancelQueries({ queryKey: queryKeys.sessions.all }),
-        queryClient.cancelQueries({ queryKey: queryKeys.dashboard.summary }),
-      ]);
-
-      const previousSessions = queryClient.getQueryData<{ sessions: MigrationSession[] }>(queryKeys.sessions.all);
-      const previousDashboard = queryClient.getQueryData<DashboardData>(queryKeys.dashboard.summary);
-      const sessionToDelete =
-        previousSessions?.sessions.find((session) => session.id === sessionId) ||
-        (previousDashboard?.recent_sessions.find((session) => session.id === sessionId) as MigrationSession | undefined) ||
-        null;
-
-      updateSessionsCache((currentSessions) =>
-        currentSessions.filter((session) => session.id !== sessionId)
-      );
-
-      return { previousSessions, previousDashboard, sessionToDelete };
-    },
-    onError: (mutationError, _variables, context) => {
-      if (context?.previousSessions) {
-        queryClient.setQueryData(queryKeys.sessions.all, context.previousSessions);
-      }
-      if (context?.previousDashboard) {
-        queryClient.setQueryData(queryKeys.dashboard.summary, context.previousDashboard);
-      }
-
-      if (!handleUnauthorizedAndRedirect(mutationError, navigate)) {
-        console.error('Failed to delete session:', mutationError);
-        toast.error(
-          mutationError instanceof Error
-            ? mutationError.message
-            : 'Failed to delete project. Please try again.'
-        );
-      }
-      setDeletingSessionId(null);
-    },
-    onSuccess: (_data, _variables, context) => {
-      if (context?.sessionToDelete) {
-        setDeletedSessionCache(context.sessionToDelete);
-
-        if (undoTimeoutRef.current) {
-          clearTimeout(undoTimeoutRef.current);
-        }
-
-        undoTimeoutRef.current = setTimeout(() => {
-          setDeletedSessionCache(null);
-        }, 8000);
-
-        toast.success('Project deleted', {
-          duration: 8000,
-          action: {
-            label: 'Undo',
-            onClick: () => handleUndoDelete(context.sessionToDelete),
-          },
-        });
-      }
-
-      setDeletingSessionId(null);
-    },
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.dashboard.summary });
-    },
+  const { rename: updateSessionNameMutation, remove: deleteSessionMutation } = useProjectActions(ownerId, {
+    onRenamed: () => { setEditingSessionId(null); setEditingName(''); },
+    onDeleted: () => setDeletingSessionId(null),
   });
 
   const isDeleting = deletingSessionId !== null && deleteSessionMutation.isPending;
@@ -205,10 +90,11 @@ export function AllProjects() {
   };
 
   const handleSaveEdit = (sessionId: string) => {
-    updateSessionNameMutation.mutate({ sessionId, projectName: editingName });
+    if (!updateSessionNameMutation.isPending && editingName.trim()) updateSessionNameMutation.mutate({ sessionId, projectName: editingName.trim() });
   };
 
   const handleDeleteClick = (sessionId: string) => {
+    deleteSessionMutation.reset();
     setDeletingSessionId(sessionId);
   };
 
@@ -217,50 +103,9 @@ export function AllProjects() {
     deleteSessionMutation.mutate({ sessionId: deletingSessionId });
   };
 
-  const handleUndoDelete = (session: MigrationSession) => {
-    // Clear the undo timeout
-    if (undoTimeoutRef.current) {
-      clearTimeout(undoTimeoutRef.current);
-      undoTimeoutRef.current = null;
-    }
-
-    updateSessionsCache((currentSessions) =>
-      [...currentSessions, session].sort(
-        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-      )
-    );
-
-    // Clear the cache
-    setDeletedSessionCache(null);
-
-    // Show success toast
-    toast.success('Project restored');
-
-    void sessionsQuery.refetch();
-  };
-
   const handleCancelDelete = () => {
     setDeletingSessionId(null);
   };
-
-  if (loading) {
-    return (
-      <Layout title={pageTitle}>
-        <div className="text-center py-8 text-muted-foreground">Loading projects...</div>
-      </Layout>
-    );
-  }
-
-  if (error) {
-    return (
-      <Layout title={pageTitle}>
-        <div className="bg-destructive/10 border border-destructive/50 text-destructive px-4 py-3 rounded mb-4">
-          {error}
-        </div>
-        <Button onClick={() => { void sessionsQuery.refetch(); }}>Retry</Button>
-      </Layout>
-    );
-  }
 
   return (
     <Layout title={pageTitle}>
@@ -268,7 +113,7 @@ export function AllProjects() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => navigate(agencyUser ? '/dashboard' : '/quick-match')}
+          onClick={() => navigate(MCP_PIVOT_ENABLED ? '/companion' : agencyUser ? '/dashboard' : '/quick-match')}
         >
           <ArrowLeft className="mr-2 h-4 w-4" />
           Go back
@@ -276,23 +121,39 @@ export function AllProjects() {
       </div>
 
       {/* Search Bar */}
-      <div className="mb-6">
-        <div className="relative">
+      <form className="mb-6 space-y-3" onSubmit={event => { event.preventDefault(); searchHistory(); }}>
+        <div className="flex flex-wrap items-center gap-3">
+        <div className="relative min-w-0 flex-1 basis-64">
           <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <input
             type="text"
+            aria-label="Search project history"
             placeholder="Search projects by name, status, or match type..."
+            maxLength={200}
+            aria-describedby="history-search-hint"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full pl-10 pr-4 py-2 border border-border bg-background text-foreground rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
           />
         </div>
+        <Button type="submit" disabled={sessionsQuery.isFetching}>Search</Button>
+        <Button type="button" variant="outline" onClick={firstPage} disabled={sessionsQuery.isFetching}>Reload first page</Button>
+        </div>
+        <p id="history-search-hint" className="text-sm text-muted-foreground">Search all project history by name, status, or match type. Reload the first page to see newer projects.</p>
+      </form>
+      <div role="status" aria-live="polite" className="mb-4 text-sm text-muted-foreground">
+        {sessionsQuery.isFetching ? 'Loading projects…' : !error && sessionsQuery.data
+          ? `${sessionsQuery.data.total_count.toLocaleString()} ${appliedSearch ? 'matching ' : ''}${sessionsQuery.data.total_count === 1 ? 'project' : 'projects'} · Page ${cursors.length}` : null}
       </div>
+      {error && <div role="alert" className="mb-4 space-y-3">
+        <p className="text-destructive">{error}</p>
+        <Button onClick={() => { void sessionsQuery.refetch(); }} disabled={sessionsQuery.isFetching}>Retry</Button>
+      </div>}
 
       {/* Projects Table */}
       <Card>
-        <div className="overflow-hidden">
-          <table className="w-full">
+        <div className="overflow-x-auto" role="region" aria-label="Project history table" tabIndex={0}>
+          <table className="w-full min-w-[48rem]">
             <thead className="bg-muted border-b border-border">
               <tr>
                 <th className="text-left p-4 text-muted-foreground text-sm">Project Name</th>
@@ -304,16 +165,18 @@ export function AllProjects() {
               </tr>
             </thead>
             <tbody>
-              {filteredSessions.map((session, index) => (
+              {(!error && !loading ? sessions : []).map((session, index) => (
                 <tr
                   key={session.id}
-                  className={index !== filteredSessions.length - 1 ? 'border-b border-border' : ''}
+                  className={index !== sessions.length - 1 ? 'border-b border-border' : ''}
                 >
-                  <td className="p-4 text-foreground">
+                  <td className="min-w-56 p-4 text-foreground">
                     {editingSessionId === session.id ? (
                       <div className="flex items-center gap-2">
                         <input
                           type="text"
+                          aria-label="Project name"
+                          disabled={updateSessionNameMutation.isPending}
                           value={editingName}
                           onChange={(e) => setEditingName(e.target.value)}
                           onKeyDown={(e) => {
@@ -327,6 +190,7 @@ export function AllProjects() {
                           onClick={() => handleSaveEdit(session.id)}
                           className="text-green-600 dark:text-green-400 hover:text-green-700 dark:hover:text-green-300"
                           title="Save"
+                          disabled={updateSessionNameMutation.isPending || !editingName.trim()}
                         >
                           <Check className="h-4 w-4" />
                         </button>
@@ -340,11 +204,12 @@ export function AllProjects() {
                       </div>
                     ) : (
                       <div className="flex items-center gap-2">
-                        <span>{session.project_name || 'Untitled Session'}</span>
+                        <span className="break-words min-w-0">{session.project_name || 'Untitled Session'}</span>
                         <button
                           onClick={() => handleStartEdit(session.id, session.project_name)}
                           className="text-muted-foreground hover:text-foreground"
                           title="Edit project name"
+                          disabled={updateSessionNameMutation.isPending}
                         >
                           <Pencil className="h-3 w-3" />
                         </button>
@@ -400,6 +265,7 @@ export function AllProjects() {
                         onClick={() => handleDeleteClick(session.id)}
                         className="ml-auto text-destructive hover:text-destructive hover:bg-destructive/10"
                         title="Delete project"
+                        aria-label={`Delete ${session.project_name || 'Untitled Session'}`}
                       >
                         <Trash2 className="h-4 w-4" />
                       </Button>
@@ -411,38 +277,29 @@ export function AllProjects() {
           </table>
         </div>
 
-        {filteredSessions.length === 0 && (
+        {!loading && !error && sessions.length === 0 && (
           <div className="p-8 text-center text-muted-foreground">
-            {searchQuery ? 'No projects match your search.' : 'No projects found. Start by creating a new mapping!'}
+            {cursor ? 'No projects remain on this page. Go to the previous page or reload the first page.' : appliedSearch ? 'No projects match your search.' : (MCP_PIVOT_ENABLED ? 'No historical projects. New migrations appear in your migration companion.' : 'No projects found. Start by creating a new mapping!')}
           </div>
         )}
       </Card>
+      <nav aria-label="Project history pages" className="mt-4 flex flex-wrap items-center justify-between gap-3">
+        <Button variant="outline" disabled={cursors.length === 1 || sessionsQuery.isFetching}
+          onClick={() => setCursors(current => current.slice(0, -1))}>Previous page</Button>
+        <span className="text-sm text-muted-foreground">{!error && sessionsQuery.data ? `${sessions.length} ${sessions.length === 1 ? 'project' : 'projects'} on this page` : ''}</span>
+        <Button variant="outline" disabled={!sessionsQuery.data?.next_cursor || sessionsQuery.isFetching || !!error}
+          onClick={() => { const next = sessionsQuery.data?.next_cursor; if (next) setCursors(current => [...current, next]); }}>Next page</Button>
+      </nav>
 
-      {/* Delete Confirmation Dialog */}
-      {deletingSessionId && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <Card className="p-6 max-w-md w-full mx-4">
-            <h3 className="text-foreground text-lg font-semibold mb-2">Delete Project</h3>
-            <p className="text-muted-foreground mb-6">
-              Are you sure you want to delete this project? This will permanently remove all
-              redirect mappings and cannot be undone.
-            </p>
-            <div className="flex justify-end gap-3">
-              <Button variant="outline" onClick={handleCancelDelete} disabled={isDeleting}>
-                Cancel
-              </Button>
-              <Button
-                variant="destructive"
-                onClick={handleConfirmDelete}
-                disabled={isDeleting}
-              >
-                {isDeleting && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
-                {isDeleting ? 'Deleting...' : 'Delete Project'}
-              </Button>
-            </div>
-          </Card>
-        </div>
-      )}
+      <DeleteProjectDialog
+        open={deletingSessionId !== null}
+        name={sessions.find(session => session.id === deletingSessionId)?.project_name || 'Untitled Session'}
+        busy={isDeleting}
+        error={deleteSessionMutation.error instanceof Error ? deleteSessionMutation.error.message : null}
+        onCancel={handleCancelDelete}
+        onConfirm={handleConfirmDelete}
+      />
+
     </Layout>
   );
 }

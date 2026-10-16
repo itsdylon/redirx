@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
@@ -105,17 +105,22 @@ function QuoteSummary({ quote }: { quote: ProjectQuote }) {
 /** Keep compatibility acquisition completely unmounted during the pivot:
  * its quote query creates a record even without a checkout click. */
 export function PricingPage({ pivotEnabled = MCP_PIVOT_ENABLED }: { pivotEnabled?: boolean } = {}) {
-  return pivotEnabled ? <RetiredPricingHandoff /> : <LegacyPricingPage />;
+  const { user } = useAuth();
+  const [params] = useSearchParams();
+  const key = `${user?.id ?? 'signed-out'}:${params.get('source_session_id') ?? ''}`;
+  return pivotEnabled ? <RetiredPricingHandoff key={key} /> : <LegacyPricingPage key={key} />;
 }
 
 function RetiredPricingHandoff() {
+  const { user } = useAuth();
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const sourceSessionId = params.get('source_session_id') || '';
   const status = useQuery({
-    queryKey: queryKeys.billing.unlockStatus(sourceSessionId),
-    queryFn: () => getProjectUnlockStatus(sourceSessionId),
-    enabled: !!sourceSessionId,
+    queryKey: queryKeys.billing.unlockStatusForOwner(user?.id || '', sourceSessionId),
+    queryFn: ({ signal }) => getProjectUnlockStatus(sourceSessionId, signal),
+    enabled: !!sourceSessionId && !!user?.id,
+    retry: false,
     refetchInterval: query => query.state.data?.quote_status === 'checkout_created' ? 4000 : false,
   });
   const paid = status.data?.is_unlocked;
@@ -143,6 +148,8 @@ function LegacyPricingPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const active = useRef(true);
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
 
   const sourceSessionId = searchParams.get('source_session_id') || '';
   const enterpriseUser = isEnterprisePlan(user?.plan);
@@ -158,32 +165,37 @@ function LegacyPricingPage() {
   });
 
   const quoteQuery = useQuery({
-    queryKey: queryKeys.billing.quote(sourceSessionId),
+    queryKey: queryKeys.billing.quoteForOwner(user?.id || '', sourceSessionId),
     queryFn: () => createProjectQuote(sourceSessionId),
-    enabled: !!sourceSessionId,
+    enabled: !!sourceSessionId && !!user?.id,
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 
   const billingStatusQuery = useQuery({
-    queryKey: queryKeys.billing.status,
-    queryFn: getBillingStatus,
-    enabled: enterpriseUser,
+    queryKey: queryKeys.billing.forOwner(user?.id || ''),
+    queryFn: ({ signal }) => getBillingStatus(signal),
+    enabled: enterpriseUser && !!user?.id,
+    retry: false,
   });
 
   const projectCheckout = useMutation({
+    retry: false,
     mutationFn: async () => {
       if (!sourceSessionId) throw new Error('No source session selected');
       const quoteId = quoteQuery.data?.id;
       return createProjectCheckout({
         sourceSessionId,
         quoteId,
-        successUrl: `${window.location.origin}/review/${sourceSessionId}?unlock=success`,
+        successUrl: `${window.location.origin}/review/${encodeURIComponent(sourceSessionId)}?unlock=success`,
         cancelUrl: `${window.location.origin}/pricing?source_session_id=${encodeURIComponent(sourceSessionId)}&status=cancelled`,
       });
     },
     onSuccess: (data) => {
+      if (!active.current) return;
       if (data.already_paid) {
         if (data.deep_session_id) {
-          navigate(`/review/${data.deep_session_id}`);
+          navigate(`/review/${encodeURIComponent(data.deep_session_id)}`);
           return;
         }
         toast.success('Project is already unlocked.');
@@ -198,6 +210,7 @@ function LegacyPricingPage() {
       toast.error('Checkout link was not returned by billing service.');
     },
     onError: (err) => {
+      if (!active.current) return;
       if (err instanceof ApiError) {
         toast.error(err.user_message || err.message);
         return;
@@ -207,8 +220,10 @@ function LegacyPricingPage() {
   });
 
   const agencyCheckout = useMutation({
+    retry: false,
     mutationFn: () => createAgencyCheckout({ billingCycle }),
     onSuccess: (data) => {
+      if (!active.current) return;
       if (data.url) {
         window.location.assign(data.url);
         return;
@@ -216,6 +231,7 @@ function LegacyPricingPage() {
       toast.error('Checkout link was not returned by billing service.');
     },
     onError: (err) => {
+      if (!active.current) return;
       if (err instanceof ApiError) {
         toast.error(err.user_message || err.message);
         return;

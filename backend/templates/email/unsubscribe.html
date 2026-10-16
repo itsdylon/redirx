@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Email preferences — RedirX</title></head>
+<body style="margin:0;background:#f4f4f5;font-family:system-ui,sans-serif;color:#18181b;">
+<main style="max-width:32rem;margin:10vh auto;padding:2rem;background:white;line-height:1.6;">
+<p style="font-weight:700;">RedirX</p>
+{% if state == 'confirm' %}
+<h1 style="font-size:1.5rem;">Stop these emails?</h1>
+<p>Unsubscribe from {{ email_type|replace('_', ' ') }} emails. This does not change your other notification preferences.</p>
+<form method="post"><button type="submit" style="font:inherit;padding:.75rem 1.25rem;background:#18181b;color:white;border:0;border-radius:.4rem;cursor:pointer;">Unsubscribe</button></form>
+{% elif state == 'saved' %}
+<h1 style="font-size:1.5rem;">Preference saved</h1>
+<p>You will no longer receive {{ email_type|replace('_', ' ') }} emails.</p>
+{% elif state == 'invalid' %}
+<h1 style="font-size:1.5rem;">Use your account settings</h1>
+<p>This link is older, expired or invalid. Sign in to manage your email preferences. No preference was changed.</p>
+{% elif state == 'unavailable' %}
+<h1 style="font-size:1.5rem;">This link is unavailable</h1>
+<p>We cannot verify this preference link right now. Sign in to manage your email preferences instead. No preference was changed.</p>
+{% else %}
+<h1 style="font-size:1.5rem;">Preference not confirmed</h1>
+<p>We could not confirm that your preference was saved. Try again or use your account settings.</p>
+<form method="post"><button type="submit" style="font:inherit;padding:.75rem 1.25rem;">Try again</button></form>
+{% endif %}
+<p><a href="/settings?tab=notifications" style="color:#166534;">Open email settings</a></p>
+</main>
+</body></html>

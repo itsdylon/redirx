@@ -106,41 +106,48 @@ def find_stripe_cli():
     return None
 
 
-def kill_existing_processes():
-    """Kill any existing dev.py, backend, worker, or http.server processes."""
-    import subprocess
-
-    print(f"{COLORS['system']}Checking for existing processes...{COLORS['reset']}")
-
-    patterns = [
-        "python.*dev.py",
-        "python.*backend.app",
-        "python.*backend.worker",
-        "python.*http.server.*800",
-        "node.*vite",
-        "stripe listen",
-    ]
-
-    killed_any = False
-    for pattern in patterns:
-        try:
-            # Use pkill -9 to force kill matching processes
-            result = subprocess.run(
-                ["pkill", "-9", "-f", pattern],
-                capture_output=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                killed_any = True
-        except (subprocess.SubprocessError, FileNotFoundError):
-            pass
-
-    if killed_any:
-        print(f"{COLORS['system']}Killed existing processes. Waiting for ports to free...{COLORS['reset']}")
-        time.sleep(2)
+def start_owned_process(cmd, **kwargs):
+    """Create only our own process group; never borrow the invoking shell's."""
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
-        print(f"{COLORS['system']}No existing processes found.{COLORS['reset']}")
-    print()
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(cmd, **kwargs)
+
+
+def stop_owned_processes(processes, grace_seconds=3):
+    """Stop tracked children and their POSIX descendants, never name matches.
+
+    POSIX groups are exactly the PIDs allocated by start_owned_process. Calling
+    getpgid on an unisolated child could instead terminate the user's shell.
+    Windows retains direct-child termination; tree cleanup is not verified here.
+    """
+    groups = []
+    for _name, proc in processes:
+        if os.name != "nt":
+            groups.append(proc.pid)
+        try:
+            if os.name == "nt":
+                if proc.poll() is None: proc.terminate()
+            else:
+                os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + grace_seconds
+    for _name, proc in processes:
+        try:
+            proc.wait(timeout=max(0, deadline-time.monotonic()))
+        except subprocess.TimeoutExpired:
+            pass
+    # A launcher may exit before its children. Terminate the recorded group,
+    # not just the launcher PID, so npm/reloader descendants cannot leak.
+    if os.name != "nt":
+        for group in groups:
+            try: os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError: pass
+    for _name, proc in processes:
+        if proc.poll() is None: proc.kill()
+        proc.wait()
 
 
 def main():
@@ -158,8 +165,7 @@ def main():
     print(f"{'=' * 60}{COLORS['reset']}")
     print()
 
-    # Kill any existing processes first
-    kill_existing_processes()
+    # Never stop pre-existing services: concurrent worktrees own their processes.
 
     # Pre-flight check
     if not check_dependencies():
@@ -174,7 +180,7 @@ def main():
         color = COLORS.get(name, COLORS["system"])
         print(f"{color}[{name:>8}]{COLORS['reset']} Starting: {' '.join(cmd) if isinstance(cmd, list) else cmd}")
 
-        proc = subprocess.Popen(
+        proc = start_owned_process(
             cmd,
             cwd=cwd,
             stdout=subprocess.PIPE,
@@ -193,6 +199,10 @@ def main():
         threads.append(t)
         return proc
 
+    def shutdown_signal(_signum, _frame):
+        raise KeyboardInterrupt
+
+    previous_term = signal.signal(signal.SIGTERM, shutdown_signal)
     try:
         # 1. Mock sites (unless skipped) — served from external dirs
         if not skip_mocks and not backend_only:
@@ -210,8 +220,11 @@ def main():
                 print(f"           Use --no-mocks to skip, or create the directories.")
 
         # 2. Backend API
-        start("backend", [PYTHON, "-m", "backend.app"])
+        backend = start("backend", [PYTHON, "-m", "backend.app"])
         time.sleep(1)
+        if backend.poll() is not None:
+            print("Backend exited during startup; no worker was started.")
+            return backend.returncode or 1
 
         # 3. Worker
         start("worker", [PYTHON, "-m", "backend.worker"])
@@ -233,7 +246,7 @@ def main():
         # 5. Frontend (unless backend-only)
         if not backend_only:
             npm = find_npm()
-            start("frontend", f"{npm} run dev", cwd=FRONTEND_DIR, shell=True)
+            start("frontend", [npm, "run", "dev", "--", "--strictPort"], cwd=FRONTEND_DIR, shell=sys.platform == "win32")
 
         print()
         print(f"{COLORS['system']}{'=' * 60}")
@@ -260,33 +273,24 @@ def main():
                         color = COLORS.get(name, COLORS["system"])
                         if ret != 0:
                             print(f"{color}[{name:>8}]{COLORS['reset']} Exited with code {ret}")
+                        if name in {"backend", "worker", "frontend"}:
+                            return ret or 1
             time.sleep(1)
 
     except KeyboardInterrupt:
         print(f"\n{COLORS['system']}Shutting down all services...{COLORS['reset']}")
 
     finally:
-        for name, proc in processes:
-            if proc.poll() is None:
-                try:
-                    if sys.platform == "win32":
-                        proc.terminate()
-                    else:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                except (ProcessLookupError, OSError):
-                    pass
+        previous_int = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            stop_owned_processes(processes)
+        finally:
+            signal.signal(signal.SIGINT, previous_int)
+            signal.signal(signal.SIGTERM, previous_term)
+        print(f"{COLORS['system']}Started services stopped; pre-existing services were left alone.{COLORS['reset']}")
 
-        time.sleep(1)
-
-        for name, proc in processes:
-            if proc.poll() is None:
-                try:
-                    proc.kill()
-                except (ProcessLookupError, OSError):
-                    pass
-
-        print(f"{COLORS['system']}All services stopped.{COLORS['reset']}")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

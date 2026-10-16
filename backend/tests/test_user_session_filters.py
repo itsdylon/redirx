@@ -30,6 +30,9 @@ class _MockQuery:
     def order(self, *_args, **_kwargs):
         return self
 
+    def limit(self, *_args):
+        return self
+
     def execute(self):
         return SimpleNamespace(data=self._data)
 
@@ -55,23 +58,47 @@ class UserSessionFilterTests(unittest.TestCase):
         self.user = SimpleNamespace(id="user-1", email="user@example.com")
         self.headers = {"Authorization": "Bearer test-token"}
 
-    def test_dashboard_excludes_preview_sessions(self):
-        mock_client = _MockClient(session_rows=[])
-        mock_session_db = SimpleNamespace(client=mock_client)
+    def test_dashboard_uses_owner_scoped_snapshot(self):
+        owner='10000000-0000-0000-0000-000000000001'
+        data={'user_id':owner,'total_sessions':0,'total_redirects':0,'total_approved':0,
+              'confidence_sum':0,'confidence_count':0,'confidence_breakdown':{'exact':0,'high':0,'medium':0,'low':0},'recent_sessions':[]}
+        admin=Mock()
+        admin.rpc.return_value.execute.return_value=SimpleNamespace(data=data,error=None)
+        with patch('services.auth_service.AuthService.verify_token',return_value=SimpleNamespace(id=owner)), patch(
+            'backend.routes.user_routes.SupabaseClient.get_admin_client',return_value=admin):
+            response=self.client.get('/api/user/dashboard',headers=self.headers)
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.json['total_sessions'],0)
+        admin.rpc.assert_called_once_with('legacy_dashboard_snapshot',{'p_user_id':owner})
+        admin.table.assert_not_called()
 
-        with patch("services.auth_service.AuthService.verify_token", return_value=self.user):
-            with patch("backend.routes.user_routes.MigrationSessionDB", return_value=mock_session_db):
-                response = self.client.get("/api/user/dashboard", headers=self.headers)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertIn(("is_preview", False), mock_client.session_query.eq_calls)
+    def test_dashboard_missing_migration_or_malformed_snapshot_fails_without_fake_zeros(self):
+        owner='10000000-0000-0000-0000-000000000001'
+        for value in (None,{}, {'user_id':'other'}, {'user_id':owner,'total_sessions':True}):
+            admin=Mock()
+            admin.rpc.return_value.execute.return_value=SimpleNamespace(data=value,error=None)
+            with patch('services.auth_service.AuthService.verify_token',return_value=SimpleNamespace(id=owner)), patch(
+                'backend.routes.user_routes.SupabaseClient.get_admin_client',return_value=admin):
+                response=self.client.get('/api/user/dashboard',headers=self.headers)
+            self.assertEqual(response.status_code,503)
+            self.assertFalse(response.json['success'])
+            self.assertNotIn('total_sessions',response.json)
+            admin.table.assert_not_called()
+        admin=Mock()
+        admin.rpc.return_value.execute.side_effect=RuntimeError('private database exception')
+        with patch('services.auth_service.AuthService.verify_token',return_value=SimpleNamespace(id=owner)), patch(
+            'backend.routes.user_routes.SupabaseClient.get_admin_client',return_value=admin):
+            response=self.client.get('/api/user/dashboard',headers=self.headers)
+        self.assertEqual(response.status_code,503)
+        self.assertNotIn('private',response.get_data(as_text=True))
+        admin.rpc.return_value.execute.assert_called_once()
 
     def test_sessions_list_excludes_preview_sessions(self):
         mock_client = _MockClient(session_rows=[])
         mock_session_db = SimpleNamespace(client=mock_client)
 
         with patch("services.auth_service.AuthService.verify_token", return_value=self.user):
-            with patch("backend.routes.user_routes.MigrationSessionDB", return_value=mock_session_db):
+            with patch("backend.routes.user_routes.SupabaseClient.get_admin_client", return_value=mock_client):
                 response = self.client.get("/api/user/sessions", headers=self.headers)
 
         self.assertEqual(response.status_code, 200)
@@ -80,47 +107,31 @@ class UserSessionFilterTests(unittest.TestCase):
         self.assertEqual(payload["sessions"], [])
         self.assertIn(("is_preview", False), mock_client.session_query.eq_calls)
 
-    def test_delete_session_uses_admin_client(self):
-        migration_sessions_table = Mock()
-        migration_sessions_table.select.return_value = migration_sessions_table
-        migration_sessions_table.delete.return_value = migration_sessions_table
-        migration_sessions_table.eq.return_value = migration_sessions_table
-        migration_sessions_table.in_.return_value = migration_sessions_table
-        migration_sessions_table.execute.side_effect = [
-            SimpleNamespace(data=[{"id": "session-1", "user_id": self.user.id}]),
-            SimpleNamespace(data=[]),
-            SimpleNamespace(data=[]),
-        ]
+    def test_delete_session_uses_one_atomic_admin_rpc(self):
+        session='20000000-0000-0000-0000-000000000001'
+        user=SimpleNamespace(id='10000000-0000-0000-0000-000000000001')
+        admin=Mock()
+        admin.rpc.return_value.execute.return_value=SimpleNamespace(data={'session_id':session,'deleted_count':2})
+        with patch('services.auth_service.AuthService.verify_token',return_value=user), patch(
+            'backend.routes.user_routes.SupabaseClient.get_admin_client',return_value=admin):
+            response=self.client.delete('/api/user/sessions/'+session,headers=self.headers)
+        self.assertEqual(response.status_code,200)
+        self.assertTrue(response.json['success'])
+        admin.rpc.assert_called_once_with('delete_owned_legacy_session',{'p_user_id':user.id,'p_session_id':session})
+        admin.table.assert_not_called()
 
-        url_mappings_table = Mock()
-        url_mappings_table.delete.return_value = url_mappings_table
-        url_mappings_table.in_.return_value = url_mappings_table
-        url_mappings_table.execute.return_value = SimpleNamespace(data=[])
-
-        webpage_embeddings_table = Mock()
-        webpage_embeddings_table.delete.return_value = webpage_embeddings_table
-        webpage_embeddings_table.in_.return_value = webpage_embeddings_table
-        webpage_embeddings_table.execute.return_value = SimpleNamespace(data=[])
-
-        mock_admin_client = Mock()
-        mock_admin_client.table.side_effect = lambda name: {
-            "migration_sessions": migration_sessions_table,
-            "url_mappings": url_mappings_table,
-            "webpage_embeddings": webpage_embeddings_table,
-        }[name]
-
-        with patch("services.auth_service.AuthService.verify_token", return_value=self.user):
-            with patch(
-                "backend.routes.user_routes.SupabaseClient.get_admin_client",
-                return_value=mock_admin_client,
-            ) as admin_client_factory:
-                with patch("backend.routes.user_routes.MigrationSessionDB") as session_db_cls:
-                    session_db_cls.return_value = SimpleNamespace(client=mock_admin_client)
-                    response = self.client.delete("/api/user/sessions/session-1", headers=self.headers)
-
-        self.assertEqual(response.status_code, 200)
-        admin_client_factory.assert_called_once_with()
-        session_db_cls.assert_called_once_with(client=mock_admin_client)
+    def test_delete_unknown_result_is_not_success_or_a_fallback_delete(self):
+        session='20000000-0000-0000-0000-000000000001'
+        user=SimpleNamespace(id='10000000-0000-0000-0000-000000000001')
+        for result in (None,{}, {'session_id':session,'deleted_count':0}):
+            admin=Mock()
+            admin.rpc.return_value.execute.return_value=SimpleNamespace(data=result)
+            with patch('services.auth_service.AuthService.verify_token',return_value=user), patch(
+                'backend.routes.user_routes.SupabaseClient.get_admin_client',return_value=admin):
+                response=self.client.delete('/api/user/sessions/'+session,headers=self.headers)
+            self.assertEqual(response.status_code,503)
+            self.assertFalse(response.json['success'])
+            admin.table.assert_not_called()
 
 
 if __name__ == "__main__":

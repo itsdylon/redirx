@@ -11,6 +11,12 @@ from .data import Page, humanize_path, path_tokens
 from .ports import EmbeddingCache
 
 class BM25:
+    """Fixed-corpus BM25 with eagerly computed term contributions.
+
+    Parameters and corpus statistics belong to this index's lifetime. Rebuild the
+    index to change them. Query term frequency still caps at two, and accumulation
+    follows query order so the existing score and tie behavior is preserved.
+    """
     def __init__(self, docs: list[list[str]], k1: float = 1.5, b: float = 0.75):
         self.k1, self.b = k1, b
         self.n = len(docs)
@@ -23,16 +29,28 @@ class BM25:
         self.idf = {
             t: math.log(1.0 + (self.n - len(p) + 0.5) / (len(p) + 0.5)) for t, p in self.postings.items()
         }
+        self._term_scores: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for t, postings in self.postings.items():
+            indices = np.array([i for i, _ in postings], dtype=np.intp)
+            # Preserve the scalar arithmetic of the original scorer exactly;
+            # computing these once avoids repeating it for every query/rewrite.
+            values = np.array([
+                self.idf[t] * tf * (self.k1 + 1)
+                / (tf + self.k1 * (1 - self.b + self.b * self.dl[i] / self.avgdl))
+                for i, tf in postings
+            ])
+            indices.flags.writeable = values.flags.writeable = False
+            self._term_scores[t] = (indices, values)
 
     def scores(self, query: list[str]) -> np.ndarray:
         out = np.zeros(self.n)
         for t, qtf in Counter(query).items():
-            if t not in self.postings:
+            term = self._term_scores.get(t)
+            if term is None:
                 continue
-            idf = self.idf[t]
-            for i, tf in self.postings[t]:
-                denom = tf + self.k1 * (1 - self.b + self.b * self.dl[i] / self.avgdl)
-                out[i] += idf * tf * (self.k1 + 1) / denom * min(qtf, 2)
+            indices, values = term
+            # Each posting contains a document once, so indexed addition is safe.
+            out[indices] += values * min(qtf, 2)
         return out
 
 
@@ -131,14 +149,14 @@ class Retriever:
         seed = [p for p in seed_pages if p.true_new_url is not None and p.site in self.by_site]
         if not seed:
             return {}
-        recall: dict[str, float] = {}
-        for v in self.active_voters():
-            hits = 0
-            for p in seed:
-                pages = self.by_site[p.site]
-                lst = self.voter_lists(p).get(v, [])[:k]
-                hits += any(pages[i].url == p.true_new_url for i in lst)
-            recall[v] = hits / len(seed)
+        hits = {v: 0 for v in self.active_voters()}
+        for p in seed:
+            pages = self.by_site[p.site]
+            # voter_lists computes every voter; evaluate each seed only once.
+            lists = self.voter_lists(p)
+            for v in hits:
+                hits[v] += any(pages[i].url == p.true_new_url for i in lists.get(v, [])[:k])
+        recall = {v: count / len(seed) for v, count in hits.items()}
         best = max(recall.values())
         self.weights = {v: (r if r >= floor * best else 0.0) for v, r in recall.items()}
         self.calibration = {"n_seed": len(seed), "recall_at_k": recall, "weights": self.weights}

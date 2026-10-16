@@ -14,7 +14,12 @@ from pathlib import Path
 
 import psycopg
 from psycopg import sql
-from psycopg.conninfo import conninfo_to_dict
+
+
+if __package__:
+    from .connection_target import validate_release_target
+else:
+    from connection_target import validate_release_target
 
 
 def fingerprint_tables(conn, baseline=None):
@@ -63,12 +68,8 @@ def main():
     if args.dsn_file.stat().st_mode & 0o077:
         raise ValueError('Credential file must be private')
     dsn = args.dsn_file.read_text().strip()
-    supplied = conninfo_to_dict(dsn)
     expected = json.loads(args.target_file.read_text())['connection_target']
-    if set(expected) != {'host', 'port', 'user', 'dbname'} or any(supplied.get(k) != v for k, v in expected.items()):
-        raise ValueError('Unexpected connection target')
-    if supplied.get('hostaddr') or supplied.get('service'):
-        raise ValueError('Connection target override is not supported')
+    validate_release_target(dsn, expected)
     baseline = json.loads(args.before.read_text()) if args.before else None
     # Exclusive output preflight before database work; credentials never go here.
     with os.fdopen(os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as out:

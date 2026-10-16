@@ -9,6 +9,8 @@ these tests pin down cases that *must not* be flagged.
 import os
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 sys.path.insert(0, BASE_DIR)
@@ -48,6 +50,13 @@ class TestNormalization(unittest.TestCase):
     def test_query_string_distinguishes_pages(self):
         self.assertFalse(rp.same_target("https://n.com/a?p=1", "https://n.com/a?p=2"))
 
+    def test_raw_params_empty_query_and_encoding_distinguish_targets(self):
+        for first, second in [("/a;v1", "/a;v2"), ("/a;", "/a"),
+                              ("/a?", "/a"), ("/a%2Fb", "/a/b"),
+                              ("/a?q=%41", "/a?q=A")]:
+            with self.subTest(first=first, second=second):
+                self.assertFalse(rp.same_target('https://n.com'+first, 'https://n.com'+second))
+
     def test_root_path_keeps_its_slash(self):
         self.assertTrue(rp.same_target("https://n.com", "https://n.com/"))
 
@@ -57,6 +66,22 @@ class TestNormalization(unittest.TestCase):
     def test_empty_never_matches(self):
         self.assertFalse(rp.same_target("", "https://n.com/a"))
         self.assertFalse(rp.same_target("https://n.com/a", ""))
+
+    def test_port_identity_preserves_standard_upgrades_and_distinct_services(self):
+        for first, second in [('http://www.n.com:80/a/', 'https://n.com:443/a'),
+                              ('http://n.com:80/a', 'http://n.com/a'),
+                              ('https://n.com:443/a', 'https://n.com/a'),
+                              ('https://[2001:4860:4860::8888]:443/a', 'https://[2001:4860:4860::8888]/a')]:
+            with self.subTest(first=first, second=second):
+                self.assertTrue(rp.same_target(first, second))
+        for first, second in [('https://n.com:8443/a', 'https://n.com:9443/a'),
+                              ('https://n.com:8443/a', 'https://n.com/a'),
+                              ('https://n.com:80/a', 'https://n.com:443/a'),
+                              ('http://n.com:443/a', 'https://n.com:443/a')]:
+            with self.subTest(first=first, second=second):
+                self.assertFalse(rp.same_target(first, second))
+        for malformed in ['https://n.com:bad/a', 'https://n.com:65536/a', 'https://[broken/a']:
+            self.assertFalse(rp.same_target(malformed, malformed))
 
 
 class TestVisitIdentity(unittest.TestCase):
@@ -119,6 +144,17 @@ class TestVisitIdentity(unittest.TestCase):
         self.assertTrue(rp.same_target(a, b))
         self.assertNotEqual(rp.visit_identity(a), rp.visit_identity(b))
 
+    def test_raw_identity_preserves_semicolons_queries_and_ipv6_authority(self):
+        for url in ['https://x.com/a;v1', 'https://x.com/a;', 'https://x.com/a?',
+                    'https://x.com/a?q=?', 'https://x.com/Case%2FPath?q=%41&b=2',
+                    'https://[2001:4860:4860::8888]/a',
+                    'https://[2001:4860:4860::8888]:8443/a']:
+            with self.subTest(url=url):
+                self.assertEqual(rp.visit_identity(url), url)
+        self.assertEqual(rp.visit_identity('https://[2001:4860:4860::8888]:443/a'),
+                         'https://[2001:4860:4860::8888]/a')
+        self.assertEqual(rp.visit_identity('https://x.com/a#fragment?'), 'https://x.com/a')
+
 
 class TestCorrectRedirectsAreNotFlagged(unittest.TestCase):
     """The most damaging bug in a monitor is the false positive."""
@@ -177,7 +213,7 @@ class TestBrokenRedirects(unittest.TestCase):
         r = result(hops=[(301, "https://new.com/")], status=200)
         self.assertEqual(rp.classify(r, "https://new.com/deep/page")[0], rp.WRONG_TARGET)
 
-    def test_302_to_the_right_place_still_loses_ranking(self):
+    def test_302_to_the_right_place_is_unsuitable_for_a_permanent_move(self):
         r = result(hops=[(302, "https://new.com/b")], status=200)
         issue, detail = rp.classify(r, "https://new.com/b")
         self.assertEqual(issue, rp.TEMPORARY_REDIRECT)
@@ -196,7 +232,7 @@ class TestBrokenRedirects(unittest.TestCase):
         self.assertIn("2 hops", detail)
 
     def test_a_temporary_hop_anywhere_in_a_chain_outranks_the_chain_itself(self):
-        # 302 loses the ranking outright; the extra hop only dilutes it.
+        # Permanent-move policy prioritizes the temporary status over extra hops.
         r = result(
             hops=[(301, "https://new.com/mid"), (302, "https://new.com/b")], status=200
         )
@@ -260,6 +296,123 @@ class TestProbeResultShape(unittest.TestCase):
     def test_hop_count_tracks_the_chain(self):
         r = result(hops=[(301, "https://n.com/x"), (301, "https://n.com/y")])
         self.assertEqual(r.hop_count, 2)
+
+
+class TestOfflineRequestIdentity(unittest.IsolatedAsyncioTestCase):
+    """Real probe orchestration and SSRF validation; requests are local stubs."""
+
+    async def run_chain(self, start, responses):
+        request = AsyncMock(side_effect=[SimpleNamespace(status=status,
+            headers={'Location': location} if location else {}, release=Mock())
+            for status, location in responses])
+        with patch.object(rp, '_request', request), patch.object(rp, 'get_limiter', return_value=None):
+            observed = await rp.probe(object(), start)
+        return observed, request
+
+    async def test_parameter_change_reaches_second_request_and_records_exact_target(self):
+        observed, request = await self.run_chain('https://x.com/a;v1', [(301, '/a;v2'), (200, None)])
+        self.assertIsNone(observed.error)
+        self.assertEqual(observed.final_url, 'https://x.com/a;v2')
+        self.assertEqual([c.args[2] for c in request.await_args_list], ['https://x.com/a;v1', 'https://x.com/a;v2'])
+        self.assertIsNone(rp.classify(observed, 'https://x.com/a;v2'))
+        self.assertEqual(rp.classify(observed, 'https://x.com/a;v1')[0], rp.WRONG_TARGET)
+
+    async def test_real_parameter_oscillation_still_detects_loop(self):
+        observed, request = await self.run_chain('https://x.com/a;v1', [(301, '/a;v2'), (301, '/a;v1')])
+        self.assertEqual(observed.error, 'loop')
+        self.assertEqual(request.await_count, 2)
+
+    async def test_client_rewrites_are_unverified_without_request_or_status(self):
+        for suffix in ['/a?', '/%41', '/a/../b', '/a%2fb', '/a?q=%41', '/café']:
+            with self.subTest(suffix=suffix):
+                observed, request = await self.run_chain('https://x.com'+suffix, [])
+                self.assertEqual(observed.error, rp.REQUEST_URL_REWRITTEN)
+                self.assertIsNone(observed.final_status)
+                self.assertEqual(request.await_count, 0)
+                self.assertEqual(rp.classify(observed, None), (rp.UNREACHABLE, rp.REQUEST_URL_REWRITTEN_DETAIL))
+
+    async def test_rewritten_redirect_target_records_only_first_observation(self):
+        observed, request = await self.run_chain('https://x.com/a', [(301, '/b?')])
+        self.assertEqual(observed.error, rp.REQUEST_URL_REWRITTEN)
+        self.assertEqual(observed.final_url, 'https://x.com/b?')
+        self.assertIsNone(observed.final_status)
+        self.assertEqual(observed.hop_count, 1)
+        self.assertEqual(request.await_count, 1)
+
+    async def test_exact_reserved_encoding_queries_and_fragments_still_request(self):
+        raw = 'https://x.com/Case%2FPath;q=1?b=2&a=1#fragment?'
+        observed, request = await self.run_chain(raw, [(200, None)])
+        self.assertIsNone(observed.error)
+        self.assertEqual(observed.final_status, 200)
+        self.assertEqual(request.await_count, 1)
+        self.assertEqual(request.await_args.args[2], raw)
+
+    async def test_ssrf_revalidation_precedes_fidelity_and_stops_redirect(self):
+        for target in ['http://169.254.169.254/a?', 'http://[::1]/a;', 'https://x.com:8443/a']:
+            with self.subTest(target=target):
+                observed, request = await self.run_chain('https://x.com/a;v1', [(301, target)])
+                self.assertEqual(observed.error, 'blocked')
+                self.assertEqual(request.await_count, 1)
+
+    async def test_invalid_authorities_and_ports_are_bounded_without_requests(self):
+        for target in ['https://x.com:bad/a', 'https://x.com:65536/a', 'https://x.com:-1/a', 'https://[broken/a']:
+            with self.subTest(target=target):
+                observed, request = await self.run_chain(target, [])
+                self.assertEqual(observed.error, 'invalid_url')
+                self.assertIsNone(observed.final_status)
+                self.assertEqual(request.await_count, 0)
+                self.assertEqual(rp.classify(observed, None)[0], rp.UNREACHABLE)
+                self.assertIn('Correct the URL and retry', rp.classify(observed, None)[1])
+
+    async def test_invalid_redirect_authorities_are_bounded_after_one_observation(self):
+        for target in ['https://x.com:bad/a', 'https://[broken/a']:
+            with self.subTest(target=target):
+                observed, request = await self.run_chain('https://x.com/start', [(301, target)])
+                self.assertEqual(observed.error, 'invalid_url')
+                self.assertIsNone(observed.final_status)
+                self.assertEqual(observed.hop_count, 1)
+                self.assertEqual(request.await_count, 1)
+
+    async def test_empty_query_locations_do_not_inherit_previous_query(self):
+        for location in ['?', '?#fragment', '/next?', 'https://x.com/next?']:
+            with self.subTest(location=location):
+                observed, request = await self.run_chain('https://x.com/a?old=1', [(301, location)])
+                self.assertEqual(observed.error, rp.REQUEST_URL_REWRITTEN)
+                self.assertNotIn('old=1', observed.final_url)
+                self.assertTrue(observed.final_url.split('#', 1)[0].endswith('?'))
+                self.assertEqual(request.await_count, 1)
+
+    async def test_relative_location_evidence_is_the_resolved_request_target(self):
+        observed, request = await self.run_chain('https://x.com/dir/a?old=1',
+                                                [(301, '../next?q=2'), (200, None)])
+        self.assertIsNone(observed.error)
+        self.assertEqual(observed.hops[0].location, '../next?q=2')
+        self.assertEqual(observed.final_url, 'https://x.com/next?q=2')
+        self.assertEqual(request.await_args.args[2], 'https://x.com/next?q=2')
+
+    def test_unrepresentable_expected_target_is_not_wrong_target_or_pass(self):
+        observed = result(hops=[(301, 'https://x.com/a')])
+        self.assertEqual(rp.classify(observed, 'https://x.com/a?'),
+                         (rp.UNREACHABLE, rp.REQUEST_URL_REWRITTEN_DETAIL))
+
+    def test_artifact_verification_marks_rewritten_source_and_expected_target_unchecked(self):
+        from backend.services.migration_verification_service import assess_probe
+        cases = [
+            (result(final='https://x.com/a?', status=None, error=rp.REQUEST_URL_REWRITTEN), 'https://x.com/b'),
+            (result(hops=[(301, 'https://x.com/a')]), 'https://x.com/a?'),
+            (result(hops=[(301, 'https://x.com/A')]), 'https://x.com/%41'),
+        ]
+        for observed, expected in cases:
+            with self.subTest(expected=expected):
+                state, finding = assess_probe(observed, expected)
+                self.assertEqual(state, 'unchecked')
+                self.assertEqual(finding['measurement'], 'unavailable')
+                self.assertEqual(finding['issue'], rp.REQUEST_URL_REWRITTEN)
+                self.assertEqual(finding['detail'], rp.REQUEST_URL_REWRITTEN_DETAIL)
+        state, finding = assess_probe(result(hops=[(301, 'https://x.com/a;v2')]), 'https://x.com/a;v2')
+        self.assertEqual(state, 'passed')
+        self.assertEqual(finding['measurement'], 'observed')
+        self.assertEqual(assess_probe(result(hops=[(301, 'https://x.com/a;v2')]), 'https://x.com/a;v1')[0], 'failed')
 
 
 if __name__ == "__main__":

@@ -114,15 +114,12 @@ def _safe_url(value: Any) -> Optional[str]:
 def _url_key(value: str) -> str:
     parsed = urlparse(value)
     if not parsed.scheme and not parsed.netloc:
-        return urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, ""))
-    return urlunparse((
-        parsed.scheme.lower(),
-        parsed.netloc.lower(),
-        parsed.path or "/",
-        parsed.params,
-        parsed.query,
-        "",
-    ))
+        key = urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, ""))
+    else:
+        key = urlunparse((parsed.scheme.lower(), parsed.netloc.lower(),
+                         parsed.path or "/", parsed.params, parsed.query, ""))
+    # Counting identity also preserves an explicitly empty query delimiter.
+    return key + "?" if "?" in value.split("#", 1)[0] and not parsed.query else key
 
 
 def _apache_literal(value: str) -> str:
@@ -318,10 +315,10 @@ def to_path(url: str) -> str:
         return url
     if not parsed.scheme or not parsed.netloc:
         return url
-    path = parsed.path or "/"
-    if parsed.params:
-        path += f";{parsed.params}"
-    return f"{path}?{parsed.query}" if parsed.query else path
+    # Slice the raw suffix rather than reconstructing parsed components. URL
+    # parsers discard empty ?/# delimiters; target fragments affect navigation.
+    suffix = url[len(parsed.scheme) + 3 + len(parsed.netloc):]
+    return suffix if suffix.startswith("/") else "/" + suffix
 
 
 def rehost(url: str, domain: str) -> str:
@@ -333,14 +330,9 @@ def rehost(url: str, domain: str) -> str:
         return url
     if not target.netloc:
         return url
-    return urlunparse((
-        target.scheme or "https",
-        target.netloc,
-        parsed.path,
-        parsed.params,
-        parsed.query,
-        parsed.fragment,
-    ))
+    suffix = (url[len(parsed.scheme) + 3 + len(parsed.netloc):]
+              if parsed.scheme and parsed.netloc else url)
+    return f"{target.scheme or 'https'}://{target.netloc}" + suffix
 
 
 def _transform(
@@ -390,12 +382,7 @@ def build_export(
         fmt: one of FORMATS.
         url_format: 'paths' (default), 'full', or 'custom' with a domain.
     """
-    if fmt not in FORMATS:
-        raise UnknownExportFormat(fmt)
-    if fmt in PATH_ONLY_FORMATS and url_format != "paths":
-        raise UnsupportedExportInput(
-            f"{fmt} requires url_format='paths' for an exact, deployable source rule."
-        )
+    _validate_export_format(fmt, url_format)
 
     selection = select_export_mappings(
         mappings,
@@ -403,6 +390,26 @@ def build_export(
         old_domain=old_domain,
         new_domain=new_domain,
     )
+    return _render_export_selection(selection, fmt, url_format=url_format)
+
+
+def _validate_export_format(fmt: str, url_format: str) -> None:
+    if fmt not in FORMATS:
+        raise UnknownExportFormat(fmt)
+    if fmt in PATH_ONLY_FORMATS and url_format != "paths":
+        raise UnsupportedExportInput(
+            f"{fmt} requires url_format='paths' for an exact, deployable source rule."
+        )
+
+
+def _render_export_selection(selection: Mapping[str, Any], fmt: str, *, url_format: str) -> str:
+    """Render a same-request selection produced by select_export_mappings.
+
+    Internal only: callers must not supply HTTP/client-selected rows. The artifact
+    service already uses this exact selection for counts and verification inputs;
+    reusing it here avoids rescanning without weakening platform safety checks.
+    """
+    _validate_export_format(fmt, url_format)
     selected = selection["mappings"]
     if fmt == APACHE and any("$" in item["new_url"] for item in selected):
         raise UnsupportedExportInput(
@@ -418,7 +425,21 @@ def build_export(
             raise UnsupportedExportInput(
                 f"{fmt} treats pattern syntax in source paths as a matcher, not a literal URL."
             )
-    if fmt in PATH_ONLY_FORMATS and any(urlparse(item["effective_old"]).query for item in selected):
+    if fmt not in {CSV_FORMAT, JSON_FORMAT} and any("#" in item["effective_old"] for item in selected):
+        raise UnsupportedExportInput(
+            "Source fragments are not sent to the server and cannot select a redirect rule. "
+            "Review the source URL or export CSV/JSON for manual handling."
+        )
+    if fmt in {APACHE, NGINX} and any(
+        "%" in (path := urlparse(item["effective_old"]).path)
+        or "//" in path or any(segment in {".", ".."} for segment in path.split("/"))
+        for item in selected
+    ):
+        raise UnsupportedExportInput(
+            f"{fmt} normalizes encoded paths, repeated slashes and dot segments before matching. "
+            "These exact raw source URLs require custom server rules; export CSV/JSON for review."
+        )
+    if fmt in PATH_ONLY_FORMATS and any("?" in item["effective_old"].split("#", 1)[0] for item in selected):
         raise UnsupportedExportInput(
             "This platform cannot express query-sensitive source rules safely."
         )
@@ -445,7 +466,9 @@ def build_export(
         return "# Include inside the target server block.\n" + body
 
     if fmt == WORDPRESS:
-        return _csv_rows([], [[old, new, "301"] for old, new in pairs])
+        # Redirection CSV: source, target, regex, HTTP code, type.
+        # A third-column 301 is interpreted as the regex flag, not the status.
+        return _csv_rows([], [[old, new, "0", "301", "url"] for old, new in pairs])
 
     if fmt == VERCEL:
         return json.dumps(
@@ -459,7 +482,15 @@ def build_export(
         )
 
     if fmt == CLOUDFLARE:
-        return "\n".join(f"{old} {new} 301" for old, new in pairs)
+        # Pages _redirects has separate static/dynamic limits. These exports
+        # contain literal static rules only; never truncate an approved artifact.
+        lines = [f"{old} {new} 301" for old, new in pairs]
+        if len(lines) > 2000 or any(len(line) > 1000 for line in lines):
+            raise UnsupportedExportInput(
+                "Cloudflare Pages supports at most 2,000 static rules and 1,000 characters per rule. "
+                "Export CSV/JSON for review and use an appropriate Bulk Redirects import or custom configuration."
+            )
+        return "\n".join(lines)
 
     if fmt == SHOPIFY:
         return _csv_rows(["Redirect from", "Redirect to"], [[o, n] for o, n in pairs])

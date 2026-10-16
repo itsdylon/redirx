@@ -47,8 +47,11 @@ Use the relevant `.env.example` as a configuration reference, with isolated test
 services. Never point an experimental worker at the production job queue.
 
 `python dev.py` starts the legacy frontend/API/worker/mock-site workflow. It does
-not start the MCP gateway or OAuth issuer and its broad process cleanup is not
-safe for concurrent worktrees. For now, start only the needed services individually:
+not start the MCP gateway or OAuth issuer. It stops only its own tracked processes;
+on POSIX, each service has an isolated process group for descendant cleanup.
+Ports remain fixed, and Vite fails when its port is occupied. Windows descendant
+cleanup has not been verified. Start only the needed services individually when
+working on the MCP product:
 
 ```sh
 python -m backend.app

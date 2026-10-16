@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
+import { getAuthRedirect } from '../lib/authRedirect';
 import { useAuth } from '../contexts/AuthContext';
 
 export function AuthCallback() {
@@ -12,6 +13,10 @@ export function AuthCallback() {
   // Hydrating the account recreates the context callback. Share one completion
   // for this mounted route so it cannot exchange/consume the return path twice.
   const completion = useRef<Promise<string> | null>(null);
+  const recoveryPath = (route: '/login' | '/signup') => {
+    const redirect = getAuthRedirect();
+    return redirect ? `${route}?redirect=${encodeURIComponent(redirect)}` : route;
+  };
 
   const parseCallbackError = (): string | null => {
     const searchParams = new URLSearchParams(window.location.search);
@@ -32,11 +37,7 @@ export function AuthCallback() {
     }
 
     if (errorDescription) {
-      try {
-        return decodeURIComponent(errorDescription.replace(/\+/g, ' '));
-      } catch {
-        return errorDescription;
-      }
+      return errorDescription;
     }
 
     if (errorStatus) {
@@ -104,12 +105,12 @@ export function AuthCallback() {
             </svg>
           </div>
           <h1 className="text-xl font-bold text-foreground mb-2">Sign-in Failed</h1>
-          <p className="text-muted-foreground mb-6">{error}</p>
+          <p role="alert" className="text-muted-foreground mb-6 break-words">{error}</p>
           <div className="space-y-2">
-            <Button onClick={() => navigate('/login')} className="w-full">
+            <Button onClick={() => navigate(recoveryPath('/login'))} className="w-full">
               Try Logging In Again
             </Button>
-            <Button variant="outline" onClick={() => navigate('/signup')} className="w-full">
+            <Button variant="outline" onClick={() => navigate(recoveryPath('/signup'))} className="w-full">
               Go to Signup
             </Button>
           </div>

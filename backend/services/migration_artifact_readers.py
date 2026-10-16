@@ -11,10 +11,15 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .migration_repository import (
-    InvalidInputError, MigrationNotFoundError, MigrationRepository,
+    InvalidInputError, MigrationNotFoundError, MigrationRepository, MigrationRepositoryError,
     RepositoryUnavailableError, _strict_uuid,
 )
 from .redirect_export import select_export_mappings
+
+
+class SelectionRevisionConflictError(MigrationRepositoryError):
+    code = "revision_conflict"
+    next_action = "poll"
 
 
 def _safe_error(result: Any) -> None:
@@ -83,7 +88,7 @@ class MigrationArtifactReaders:
         self.repository.get_run(owner, migration, run)
         initial_revision = self._selection_revision(owner, migration, run)
         if initial_revision != requested:
-            raise RepositoryUnavailableError("Migration selection revision is no longer current.")
+            raise SelectionRevisionConflictError("Migration selection revision changed. Read current migration state before exporting.")
         items: list[dict[str, Any]] = []
         cursor: dict[str, Any] | None = None
         seen_cursors: set[str] = set()
@@ -122,7 +127,7 @@ class MigrationArtifactReaders:
                 row["action"] = decision
                 items.append(row)
             if self._selection_revision(owner, migration, run) != initial_revision:
-                raise RepositoryUnavailableError("Migration selection changed while it was being read.")
+                raise SelectionRevisionConflictError("Migration selection changed while it was being read. Read current migration state before exporting.")
             next_cursor = page.get("next_cursor")
             if next_cursor is None:
                 break
@@ -136,7 +141,7 @@ class MigrationArtifactReaders:
             if len(items) > 50_000:
                 raise RepositoryUnavailableError("Migration selection exceeds the supported artifact bound.")
         if self._selection_revision(owner, migration, run) != initial_revision:
-            raise RepositoryUnavailableError("Migration selection revision is no longer current.")
+            raise SelectionRevisionConflictError("Migration selection revision changed. Read current migration state before exporting.")
         origins: list[str] = []
         emitted = select_export_mappings(
             items, url_format="paths", old_domain=migration_row.get("old_origin"),

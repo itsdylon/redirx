@@ -1,7 +1,7 @@
 # RedirX MCP gateway
 
 RedirX is a remote Streamable HTTP MCP service for planning a site migration,
-matching content, resolving exceptions, producing redirect artifacts, and
+matching URL inventories, resolving exceptions, producing redirect artifacts, and
 checking installed redirects. This TypeScript gateway delegates business and
 account authority to the existing Flask API, worker and database. There is no
 local RedirX binary or stdio server to install.
@@ -61,9 +61,9 @@ including that field. The table lists the business arguments.
 
 | Tool | Required business arguments | Result / optional arguments |
 | --- | --- | --- |
-| `plan_migration` | `old_site`, `new_site`, `idempotency_key` | Durable plan/discovery. Optional `name`, `site_aliases: {old: [], new: []}`. |
+| `plan_migration` | `old_site`, `new_site`, `idempotency_key` | Durable plan; no crawl or model run. Optional `name`, `site_aliases: {old: [], new: []}`. |
 | `import_inventory` | `migration_id`, `side`, `urls`, `idempotency_key` | Explicit HTTP(S) URL strings into an owned immutable inventory; no crawl. Free Jev bounds: 500 old / 2000 new URLs, 2 MiB URL text total. |
-| `run_migration` | `migration_id`, `old_inventory_id`, `new_inventory_id`, `idempotency_key` | Entitled run or recoverable payment state. Optional `quote_id`. |
+| `run_migration` | `migration_id`, `old_inventory_id`, `new_inventory_id`, `idempotency_key` | Free URL-only Jev run. Optional `quote_id`, explicitly verified `confirmed_pairs` (up to 100). Historical payment states remain readable. |
 | `refine_matches` | `migration_id`, `run_id`, `expected_seed_revision`, `idempotency_key` | Resume a paused Jev pass or improve unresolved mappings with confirmed examples; up to three total passes. |
 | `get_migration` | `migration_id` | Progress/next action. Optional `run_id`, `operation_id`. |
 | `list_matches` | `migration_id`, `run_id` | Optional `filter`, opaque `cursor`, `limit` (default 100, maximum 500). |
@@ -88,11 +88,73 @@ Important argument details:
   Do not combine the forms. `{}` preserves artifact destinations. Confirm only
   installation that actually happened.
 
-The gateway currently returns the canonical JSON envelope in MCP text content:
+The gateway returns the same canonical JSON envelope in MCP `structuredContent`
+and JSON text content for older clients. Every tool advertises its envelope
+`outputSchema`:
 `contract_version`, durable IDs, `status`, `next_action`, optional progress/retry
 timing, `data`, and `error`. Poll with the returned timing and retain the migration
 ID for reconnection. Matching success does not imply deployment; partial coverage
 does not imply a passed verification.
+
+A backend `failed` outcome sets MCP `isError: true` while preserving its error,
+IDs, and recovery action. `partial`, payment and consent handoffs retain their
+business states rather than being flattened into an error. Always inspect the
+status and per-row outcomes; an accepted tool call is not proof every decision
+succeeded. Malformed envelopes are rejected rather than reported as success.
+
+The v2 backend request has a 25-second deadline, including reading its response
+body, and honors MCP cancellation. It never automatically retries. This deadline
+starts after delegated identity resolution. A timeout or cancellation **does not
+undo a mutation**: its outcome may be unknown. Read status with known durable
+IDs, then replay only the identical input and original idempotency key if needed.
+Never create a replacement key merely because the response was lost.
+
+### First-use guidance available to clients
+
+Pivot initialization includes workflow instructions and points to the static
+`redirx://guides/first-migration` resource. Clients can discover it with
+`resources/list` and read it without a backend request. Host applications decide
+whether to display or include resources; this is not a guarantee that a client
+will consume the guide. The nine business tools and owned artifact resources
+are unchanged; legacy mode does not receive this pivot guide.
+
+Import actual page URL lists, not a sitemap file URL. `old` contains source pages
+needing migration decisions; `new` contains available destination pages. Plan
+origins and explicit aliases before importing. Import `complete` means the supplied
+list passed syntax/origin checks, not that the entire site was inventoried or
+that pages are reachable. A partial import returns bounded `input_issues`: finite
+reason counts, total/available diagnostic counts, completeness and truncation,
+and at most ten sanitized URL hints. Hints omit queries/fragments; invalid or
+long URLs have no hint. Correct the original list under a new key rather than
+silently dropping exclusions. Old snapshots may lack complete diagnostics.
+
+### Agent journey: import, review, export
+
+1. `plan_migration` returns a durable `migration_id`. Retain it and each mutation's
+   exact arguments/key so the conversation can resume after reconnecting.
+2. `import_inventory` separately for `old` and `new`. Preserve raw URL strings,
+   case and escaping. Use `data.inventory.id` only if its status is `complete`.
+   Correct a partial inventory under a new key; do not silently treat it as complete.
+3. `run_migration` with both complete inventory IDs. Supply `confirmed_pairs` only
+   for explicitly verified examples. Retain returned `run_id` and `operation_id`.
+4. `get_migration` with the selected run, respecting `retry_after_seconds` before
+   polling again. If paused, resolve its reported cause before `refine_matches`;
+   the required revision is `data.jev.seed_revision`, not a mapping revision.
+5. `list_matches` with a consistent run/filter and follow `data.next_cursor` until
+   null. Review proposals with the user. Model confidence is an estimate, not a
+   calibrated accuracy or permission to approve. Missing matches remain review work.
+6. `resolve_matches` in batches of at most 100 explicit decisions. For Jev's
+   confirmed example use `set_target`, `target_url`, `mapping_id` and the row's
+   `expected_revision`. Inspect every outcome. A conflict requires fresh reads
+   and reassessment, not blindly incrementing a revision or resubmitting a guess.
+7. `export_redirects` uses the latest `data.selection_revision` as `revision`.
+   This is distinct from a row revision and `seed_revision`. Partial export needs
+   explicit agreement to exclusions. Read the returned artifact through the
+   registered `redirx://` resource; a download is not an installation.
+8. After actual installation, `verify_redirects` uses the artifact and explicit
+   deployment inputs described above. Report passed, failed and unchecked counts;
+   an incomplete check is not proof the migration is healthy.
+
 
 Checkout, operation status and deployment confirmation also have authorized REST
 resources; they are not additional MCP tools. Follow the
@@ -100,9 +162,11 @@ resources; they are not additional MCP tools. Follow the
 `import_inventory` is a real MCP tool (see the table above); do not confuse it
 with these REST-only resources.
 
-## Commercial policy — test mode
+## Historical commercial policy — test mode
 
-The implemented policy remains **`test_only`**. These approved amounts describe
+New Jev runs use the free limits above; the following content-engine pricing and
+capacity describe retained historical/shared workflows, not expanded Jev admission.
+The implemented commercial policy remains **`test_only`**. These approved amounts describe
 the contract and sandbox checkout, not an announcement of live paid sales:
 
 | Unique eligible old-site pages | Whole-migration price |

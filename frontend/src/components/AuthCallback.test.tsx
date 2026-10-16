@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import { StrictMode } from 'react';
-import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
+import { Link, MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import userEvent from '@testing-library/user-event';
 import { AuthCallback } from './AuthCallback';
 
@@ -14,6 +14,11 @@ vi.mock('../contexts/AuthContext', () => ({
   }),
 }));
 
+function LoginDestination() {
+  const location = useLocation();
+  return <><div>Login Route</div><output>{location.search}</output></>;
+}
+
 function renderCallback(initialPath = '/auth/callback') {
   window.history.pushState({}, '', initialPath);
   return render(
@@ -21,7 +26,7 @@ function renderCallback(initialPath = '/auth/callback') {
       <Routes>
         <Route path="/auth/callback" element={<AuthCallback />} />
         <Route path="/quick-match" element={<div>Quick Match Route</div>} />
-        <Route path="/login" element={<div>Login Route</div>} />
+        <Route path="/login" element={<LoginDestination />} />
       </Routes>
     </MemoryRouter>
   );
@@ -30,6 +35,7 @@ function renderCallback(initialPath = '/auth/callback') {
 describe('AuthCallback', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
     callbackImplementation = mockCompleteOAuthCallback;
   });
 
@@ -118,4 +124,25 @@ describe('AuthCallback', () => {
     expect(screen.getByText('Login Route')).toBeInTheDocument();
     expect(screen.queryByText('Unexpected Home')).not.toBeInTheDocument();
   });
+  it('keeps the reviewed migration deep link when restarting failed sign-in', async () => {
+    const redirect = '/migrations/10000000-0000-0000-0000-000000000001?tab=review';
+    localStorage.setItem('auth_redirect', redirect);
+    renderCallback('/auth/callback?error=access_denied');
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Try Logging In Again' }));
+    expect(screen.getByText(`?redirect=${encodeURIComponent(redirect)}`)).toBeInTheDocument();
+    expect(localStorage.getItem('auth_redirect')).toBe(redirect);
+  });
+
+  it('never carries an external stored return URL into recovery', async () => {
+    localStorage.setItem('auth_redirect', '//outside.example');
+    renderCallback('/auth/callback?error=access_denied');
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Try Logging In Again' }));
+    expect(screen.getByRole('status')).toHaveTextContent('');
+  });
+
+  it('decodes provider messages once, preserving literal percent and plus characters', async () => {
+    renderCallback('/auth/callback?error=denied&error_description=literal%2Bplus%2520text');
+    expect(await screen.findByText('literal+plus%20text')).toBeInTheDocument();
+  });
+
 });

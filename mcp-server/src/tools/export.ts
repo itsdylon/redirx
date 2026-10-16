@@ -32,7 +32,7 @@ export function registerExportTool(server: McpServer): void {
       description: DESCRIPTION,
       inputSchema: {
         migration_id: z.string().describe('The migration_id from deep_match.'),
-        format: z.enum(FORMATS).default('csv').describe('Target platform format for the redirect file.'),
+        format: z.enum(FORMATS).default('csv').describe('Target format: wordpress is Redirection plugin CSV; cloudflare is Pages _redirects. Generic csv/json are review mappings that need adaptation before installation.'),
         url_format: z
           .enum(['paths', 'full'])
           .default('paths')

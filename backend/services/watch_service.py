@@ -206,8 +206,30 @@ class WatchService:
         Idempotent on session_id: "watch this migration" clicked twice must not
         double the probe traffic against a customer's origin.
         """
+        # Replays still need authorization. The browser calls this service
+        # directly after entitlement checking; an existing watch is not proof
+        # that this caller owns its session or may resume recurring probes.
+        session = (
+            self.client.table("migration_sessions")
+            .select("id, user_id, old_site_domain, new_site_domain")
+            .eq("id", session_id)
+            .eq("user_id", str(user_id))
+            .execute()
+        )
+        if not session.data:
+            raise ValueError("session_not_found")
+        record = session.data[0]
+        if str(record.get("user_id")) != str(user_id):
+            # 404-shaped, matching the v1 API's rule that a credential must not
+            # be able to probe for other users' data.
+            raise ValueError("session_not_found")
+
         existing = self.get_watch_for_session(session_id)
         if existing:
+            # Keep the denormalized watch owner consistent with the authorized
+            # session owner, including older or malformed retained records.
+            if str(existing.get("user_id")) != str(user_id):
+                raise ValueError("session_not_found")
             if existing.get("status") != "active":
                 reactivated = self.set_status(existing["id"], "active")
                 capture(
@@ -220,20 +242,6 @@ class WatchService:
             # Already active: idempotent no-op, and not an activation. Counting
             # it would make "watch this" clicked twice look like two customers.
             return existing
-
-        session = (
-            self.client.table("migration_sessions")
-            .select("id, user_id, old_site_domain, new_site_domain")
-            .eq("id", session_id)
-            .execute()
-        )
-        if not session.data:
-            raise ValueError("session_not_found")
-        record = session.data[0]
-        if str(record.get("user_id")) != str(user_id):
-            # 404-shaped, matching the v1 API's rule that a credential must not
-            # be able to probe for other users' data.
-            raise ValueError("session_not_found")
 
         old_domain = bare_host(record.get("old_site_domain") or "")
         if not old_domain:

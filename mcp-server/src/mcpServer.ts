@@ -5,6 +5,7 @@ import { registerExportTool } from './tools/export.js';
 import { registerPreviewTool } from './tools/preview.js';
 import { registerPivotTools } from './tools/pivot.js';
 import { registerArtifactResources } from './resources/artifacts.js';
+import { FIRST_MIGRATION_INSTRUCTIONS, registerFirstMigrationResource } from './resources/firstMigration.js';
 import { setupTelemetry } from './telemetry/posthog.js';
 import { config } from './config.js';
 
@@ -16,11 +17,15 @@ import { config } from './config.js';
  * not a long-lived singleton.
  */
 export function buildMcpServer(): McpServer {
-  const server = new McpServer({ name: 'redirx', version: '0.1.0' }, { capabilities: {} });
+  const server = new McpServer({ name: 'redirx', version: '0.1.0' }, {
+    capabilities: {},
+    ...(config.pivotEnabled ? { instructions: FIRST_MIGRATION_INSTRUCTIONS } : {}),
+  });
 
   if (config.pivotEnabled) {
     registerPivotTools(server);
     registerArtifactResources(server);
+    registerFirstMigrationResource(server);
   } else {
     registerDiscoverTool(server);
     registerDeepMatchTool(server);

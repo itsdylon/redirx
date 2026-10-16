@@ -1,8 +1,9 @@
 import { lazy, Suspense } from 'react';
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, Link, useLocation } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
 import { getAuthRedirect, sanitizeRedirectPath } from './lib/authRedirect';
 import { MCP_PIVOT_ENABLED } from './api/config';
+import { LoadBoundary } from './components/LoadBoundary';
 import { Toaster } from './components/ui/sonner';
 import { isEnterprisePlan } from './lib/plans';
 import { Button } from './components/ui/button';
@@ -83,6 +84,7 @@ export default function App({ pivotEnabled = MCP_PIVOT_ENABLED }: { pivotEnabled
   }
 
   return (
+    <LoadBoundary resetKey={location.pathname} homeHref={user ? authedHome : ROUTES.login}>
     <Suspense fallback={routeLoading}>
       <Routes>
         {/* Public routes */}
@@ -204,8 +206,14 @@ export default function App({ pivotEnabled = MCP_PIVOT_ENABLED }: { pivotEnabled
               : <Navigate to={retainedLogin} replace />
           }
         />
+        <Route path="*" element={<main className="mx-auto max-w-xl space-y-4 px-6 py-20">
+          <h1 className="text-2xl font-semibold">Page not found</h1>
+          <p className="text-muted-foreground">This address does not match a RedirX page. Check the link or return to your workspace.</p>
+          <Button asChild><Link to={user ? authedHome : ROUTES.login}>{user ? 'Return to your workspace' : 'Sign in to RedirX'}</Link></Button>
+        </main>} />
       </Routes>
     </Suspense>
+    </LoadBoundary>
   );
 }
 

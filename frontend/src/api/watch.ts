@@ -1,5 +1,5 @@
 import { API_BASE_URL, getAuthHeaders } from './config';
-import { handleApiError } from '../utils/errorHandler';
+import { handleApiError, throwApiErrorFromResponse } from '../utils/errorHandler';
 
 export type WatchStatus = 'active' | 'paused' | 'ended';
 
@@ -104,7 +104,7 @@ export const ISSUE_COPY: Record<IssueType, { label: string; hint: string }> = {
   },
   temporary_redirect: {
     label: 'Temporary redirect',
-    hint: 'A 302 tells search engines the move is not permanent, so ranking is not passed on.',
+    hint: 'For a permanent move, use a 301 or 308. Temporary redirects do not give Google the same signal to select the destination as canonical.',
   },
   redirect_loop: {
     label: 'Redirect loop',
@@ -124,14 +124,11 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
   try {
     const response = await fetch(`${API_BASE_URL}${path}`, init);
     if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
-      if (typeof data.error === 'string' && data.error) {
-        throw new Error(data.error);
-      }
-      const userError = await handleApiError(null, response);
-      throw new Error(userError.message);
+      await throwApiErrorFromResponse(response);
     }
-    return await response.json();
+    const data = await response.json();
+    if (data?.success === false) throw new Error(typeof data.error === 'string' ? data.error : 'The request did not complete. Try again.');
+    return data;
   } catch (error: any) {
     if (error instanceof TypeError || error.name === 'AbortError') {
       const userError = await handleApiError(error);
@@ -141,21 +138,22 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
   }
 }
 
-export async function listWatches(): Promise<Watch[]> {
+export async function listWatches(signal?: AbortSignal): Promise<Watch[]> {
   const data = await request<{ success: boolean; watches: Watch[] }>('/api/watches', {
-    method: 'GET',
+    method: 'GET', signal,
     headers: getAuthHeaders(),
   });
-  return data.watches ?? [];
+  if (!Array.isArray(data.watches)) throw new Error('Monitoring history was incomplete. Retry loading it.');
+  return data.watches;
 }
 
 export async function createWatch(params: {
   sessionId: string;
   alertEmail?: string;
   checkIntervalMinutes?: number;
-}): Promise<Watch> {
+}, signal?: AbortSignal): Promise<Watch> {
   const data = await request<{ success: boolean; watch: Watch }>('/api/watches', {
-    method: 'POST',
+    method: 'POST', signal,
     headers: getAuthHeaders(),
     body: JSON.stringify({
       session_id: params.sessionId,
@@ -166,27 +164,29 @@ export async function createWatch(params: {
   return data.watch;
 }
 
-export async function getWatch(watchId: string): Promise<WatchDetail> {
+export async function getWatch(watchId: string, signal?: AbortSignal): Promise<WatchDetail> {
   return request<WatchDetail>(`/api/watches/${watchId}`, {
-    method: 'GET',
+    method: 'GET', signal,
     headers: getAuthHeaders(),
   });
 }
 
-export async function setWatchStatus(watchId: string, status: WatchStatus): Promise<Watch> {
+export async function setWatchStatus(watchId: string, status: WatchStatus, signal?: AbortSignal): Promise<Watch> {
   const data = await request<{ success: boolean; watch: Watch }>(`/api/watches/${watchId}`, {
-    method: 'PATCH',
+    method: 'PATCH', signal,
     headers: getAuthHeaders(),
     body: JSON.stringify({ status }),
   });
+  if (data.watch?.id !== watchId || data.watch.status !== status) throw new Error('The monitoring status was not confirmed. Refresh before trying again.');
   return data.watch;
 }
 
-export async function checkNow(watchId: string): Promise<void> {
-  await request(`/api/watches/${watchId}/check-now`, {
-    method: 'POST',
+export async function checkNow(watchId: string, signal?: AbortSignal): Promise<void> {
+  const data = await request<{ queued?: boolean }>(`/api/watches/${watchId}/check-now`, {
+    method: 'POST', signal,
     headers: getAuthHeaders(),
   });
+  if (data.queued !== true) throw new Error('The check was not confirmed as queued. Refresh the monitor before retrying.');
 }
 
 /**
@@ -195,10 +195,10 @@ export async function checkNow(watchId: string): Promise<void> {
  * Fetched rather than linked because the endpoint needs an Authorization
  * header, which a plain <a href> cannot carry.
  */
-export async function downloadFixes(watchId: string, format: string): Promise<void> {
+export async function downloadFixes(watchId: string, format: string, signal?: AbortSignal): Promise<void> {
   const response = await fetch(
     `${API_BASE_URL}/api/watches/${watchId}/fixes/export?format=${encodeURIComponent(format)}`,
-    { method: 'GET', headers: getAuthHeaders() }
+    { method: 'GET', headers: getAuthHeaders(), signal }
   );
   if (!response.ok) {
     const userError = await handleApiError(null, response);
@@ -210,6 +210,7 @@ export async function downloadFixes(watchId: string, format: string): Promise<vo
   const filename = match ? match[1] : `fix-redirects.${format}`;
 
   const blob = await response.blob();
+  if (signal?.aborted) return;
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;

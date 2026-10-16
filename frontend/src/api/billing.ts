@@ -147,8 +147,9 @@ export async function createAgencyCheckout(params?: {
   return res.json();
 }
 
-export async function getBillingStatus(): Promise<BillingStatus> {
+export async function getBillingStatus(signal?: AbortSignal): Promise<BillingStatus> {
   const res = await fetch(`${API_BASE_URL}/api/billing/status`, {
+    signal,
     headers: getAuthHeaders(),
   });
   if (!res.ok) {
@@ -158,8 +159,9 @@ export async function getBillingStatus(): Promise<BillingStatus> {
   return data;
 }
 
-export async function getProjectUnlockStatus(sourceSessionId: string): Promise<ProjectUnlockStatus> {
-  const res = await fetch(`${API_BASE_URL}/api/projects/${sourceSessionId}/unlock-status`, {
+export async function getProjectUnlockStatus(sourceSessionId: string, signal?: AbortSignal): Promise<ProjectUnlockStatus> {
+  const res = await fetch(`${API_BASE_URL}/api/projects/${encodeURIComponent(sourceSessionId)}/unlock-status`, {
+    signal,
     headers: getAuthHeaders(),
   });
   if (!res.ok) {

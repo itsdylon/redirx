@@ -14,6 +14,7 @@ import { RedirxClient } from '../backend/redirxClient.js';
 export interface ToolExtra {
   authInfo?: AuthInfo & { extra?: VerifiedIdentity };
   _meta?: Record<string, unknown>;
+  signal?: AbortSignal;
 }
 
 /** Resolves the caller's Redirx identity and hands back a client already carrying their API key. */

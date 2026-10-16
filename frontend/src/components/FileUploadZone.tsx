@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useId } from 'react';
 import { Upload, File, X, AlertCircle } from 'lucide-react';
 import { Button } from './ui/button';
 import { Alert, AlertDescription } from './ui/alert';
@@ -9,11 +9,13 @@ interface FileUploadZoneProps {
   onFileRemove: () => void;
   file: { name: string; rowCount: number } | null;
   validationError?: string | null;
+  checkingFileName?: string | null;
 }
 
-export function FileUploadZone({ label, onFileUpload, onFileRemove, file, validationError }: FileUploadZoneProps) {
+export function FileUploadZone({ label, onFileUpload, onFileRemove, file, validationError, checkingFileName }: FileUploadZoneProps) {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const inputId = useId();
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
@@ -29,8 +31,9 @@ export function FileUploadZone({ label, onFileUpload, onFileRemove, file, valida
     setIsDragging(false);
 
     const droppedFile = e.dataTransfer.files[0];
-    const name = droppedFile?.name.toLowerCase() || '';
-    if (droppedFile && (name.endsWith('.csv') || name.endsWith('.txt') || name.endsWith('.xml') || name.endsWith('.xlsx'))) {
+    // The same validator handles picker and drop errors; unsupported drops
+    // must not silently disappear.
+    if (droppedFile) {
       onFileUpload(droppedFile);
     }
   };
@@ -39,6 +42,7 @@ export function FileUploadZone({ label, onFileUpload, onFileRemove, file, valida
     const selectedFile = e.target.files?.[0];
     if (selectedFile) {
       onFileUpload(selectedFile);
+      e.target.value = '';
     }
   };
 
@@ -58,7 +62,7 @@ export function FileUploadZone({ label, onFileUpload, onFileRemove, file, valida
 
   return (
     <div>
-      <label className="block mb-2 text-foreground">{label}</label>
+      <label htmlFor={inputId} className="block mb-2 text-foreground">{label}</label>
 
       {validationError && (
         <Alert variant="destructive" className="mb-3">
@@ -81,6 +85,7 @@ export function FileUploadZone({ label, onFileUpload, onFileRemove, file, valida
         `}
       >
         <input
+          id={inputId}
           ref={fileInputRef}
           type="file"
           accept=".csv,.txt,.xml,.xlsx"
@@ -88,7 +93,16 @@ export function FileUploadZone({ label, onFileUpload, onFileRemove, file, valida
           className="hidden"
         />
 
-        {!file ? (
+        {checkingFileName ? (
+          <div className="w-full space-y-4">
+            <p role="status" className="break-all">Checking {checkingFileName}…</p>
+            <p className="text-sm text-muted-foreground">Reading URLs and checking the file. Nothing has been uploaded yet.</p>
+            <div className="flex flex-wrap justify-center gap-3">
+              <Button variant="outline" type="button">Choose another file</Button>
+              <Button variant="outline" type="button" onClick={handleRemove} aria-label={`Cancel checking ${checkingFileName}`}>Cancel check</Button>
+            </div>
+          </div>
+        ) : !file ? (
           <>
             <Upload className="h-12 w-12 text-muted-foreground mb-4" />
             <p className="text-foreground mb-1">
@@ -105,10 +119,10 @@ export function FileUploadZone({ label, onFileUpload, onFileRemove, file, valida
         ) : (
           <div className="w-full">
             <div className="flex items-center justify-between p-4 border border-border bg-card">
-              <div className="flex items-center gap-3">
-                <File className="h-8 w-8 text-muted-foreground" />
-                <div className="text-left">
-                  <p className="text-foreground">{file.name}</p>
+              <div className="flex min-w-0 items-center gap-3">
+                <File className="h-8 w-8 shrink-0 text-muted-foreground" />
+                <div className="min-w-0 text-left">
+                  <p className="text-foreground break-all">{file.name}</p>
                   <p className="text-muted-foreground text-sm">{file.rowCount} rows</p>
                 </div>
               </div>
@@ -117,13 +131,15 @@ export function FileUploadZone({ label, onFileUpload, onFileRemove, file, valida
                 size="icon"
                 onClick={handleRemove}
                 type="button"
+                aria-label={`Remove ${file.name}`}
+                className="shrink-0"
               >
                 <X className="h-4 w-4" />
               </Button>
             </div>
-            <p className="text-muted-foreground text-sm mt-4">
-              Click to replace file
-            </p>
+            <Button variant="outline" type="button" className="mt-4">
+              Replace file
+            </Button>
           </div>
         )}
       </div>

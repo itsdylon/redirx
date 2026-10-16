@@ -143,7 +143,9 @@ def transform_mapping_for_frontend(
     result = {
         'id': str(db_record['id']),
         'oldUrl': old_url,
-        'newUrl': new_url,
+        # Display stays a string; the precondition preserves null vs empty.
+        'newUrl': new_url if new_url is not None else '',
+        'persistedNewUrl': new_url,
         'confidence': confidence_int,
         'confidenceBand': confidence_band,
         'matchScore': confidence_int,

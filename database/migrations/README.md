@@ -2,6 +2,37 @@
 
 This directory contains SQL migration scripts for the Redirx database.
 
+## Current release dependencies
+
+The current Jev contract requires migration 062 and preserves its durable run
+markers. Deferred billing migrations 059–061 remain inactive; a numeric gap is
+not an instruction to enable them. Verify the applied schema against the intended
+release before executing SQL. Applied migrations are immutable history.
+
+Applied current billing migrations063–064 remain byte-identical. The product release adds these independent service-role RPCs:
+
+- [065: atomic historical deletion](065-atomic-legacy-session-delete-notes.md)
+  must precede the corresponding delete-route release.
+- [066: historical dashboard snapshot](066-legacy-dashboard-snapshot-notes.md)
+  must precede the corresponding dashboard-reader release.
+- [067: bounded historical project pages](../../docs/research/history-pagination/README.md)
+  must precede the new cursor API and historical/account screen release.
+- [068: atomic historical GSC disconnect](../../docs/research/historical-authority/gsc-disconnect.md)
+  must precede the updated browser disconnect service; it requires024 and040.
+
+- [069: run-scoped initial Jev seeds](069-jev-initial-seed-operation-scope-notes.md) fixes confirmation idempotency across runs.
+
+These remain staged, with disposable-database verification only. Missing RPCs
+produce recoverable errors rather than partial deletes or fabricated totals.
+None activates deferred billing. Existing deployments are not established by
+the presence of files in this directory.
+
+The [staged history schema check](../../docs/research/schema-readiness/README.md)
+verifies current 065–067 function definitions and effective grants without applying
+SQL or invoking RPCs. A matching migration ledger alone does not establish that
+those current definitions and grants remain intact. This check is narrower than
+whole-product readiness and requires an explicitly reviewed function owner.
+
 ## Running Migrations
 
 Migrations must be run manually in the Supabase SQL Editor:
@@ -9,7 +40,8 @@ Migrations must be run manually in the Supabase SQL Editor:
 1. Go to [Supabase Dashboard](https://app.supabase.com)
 2. Navigate to your project
 3. Click "SQL Editor" in the left sidebar
-4. Open and run each migration file in order
+4. Apply only the missing migrations required by the reviewed release, respecting
+   their individual prerequisites and the deferred migrations above.
 
 ## Migration Files
 
@@ -66,7 +98,8 @@ Migrations must be run manually in the Supabase SQL Editor:
 
 ## Verification
 
-After running all migrations, verify with:
+After applying the migrations required by the reviewed release, verify their
+individual contracts. The following checks cover only the older worker objects:
 
 ```sql
 -- Check trigger exists
@@ -87,9 +120,11 @@ WHERE table_name = 'migration_sessions'
 ORDER BY column_name;
 ```
 
-## Rollback
+## Historical worker rollback reference
 
-If you need to rollback the migrations:
+The following older recipe concerns migrations 004–007. It is not a rollback plan
+for a current Jev deployment: current worker and RPC dependencies must be reviewed
+before removing these objects.
 
 ```sql
 -- Remove trigger
@@ -115,8 +150,9 @@ ALTER TABLE migration_sessions
 
 ## Notes
 
-- **Run in order**: Migrations should be run in numerical order (004, 005, 006, 007)
-- **Idempotent**: Safe to run multiple times (uses IF NOT EXISTS where possible)
-- **Production safe**: All migrations are non-blocking and backward compatible
-- **Zero downtime**: Old worker code will continue to work during migration
-- **Migration 007 is critical**: If you're seeing progress meter issues (jumping to stage 7 then regressing), run migration 007 immediately
+- The worker recipes above describe historical migrations 004–007 and 023.
+- Re-runnability, lock behavior and compatibility depend on each migration; they
+  are not directory-wide guarantees. For example, 066 creates a new function and
+  is not intended to be applied twice.
+- Review current function definitions before using historical troubleshooting or
+  rollback SQL; later migrations may have replaced those definitions.

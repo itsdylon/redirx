@@ -46,12 +46,18 @@ export function parseXmlSitemap(xmlText: string): ParseResult {
     return result;
   }
 
-  // Extract <loc> elements — try with namespace first, fallback to no namespace
+  // Only direct sitemap url/loc children describe pages. Descendant locs may
+  // belong to image/video extensions (including a different default namespace).
   const NS = 'http://www.sitemaps.org/schemas/sitemap/0.9';
-  let locs = doc.getElementsByTagNameNS(NS, 'loc');
-  if (locs.length === 0) {
-    locs = doc.getElementsByTagName('loc');
+  if (root.namespaceURI && root.namespaceURI !== NS) {
+    result.errors.push('File is not a sitemap. The <urlset> namespace is not supported.');
+    return result;
   }
+  const sameNamespace = (element: Element) => element.namespaceURI === root.namespaceURI;
+  const locs = Array.from(root.children)
+    .filter(element => element.localName === 'url' && sameNamespace(element))
+    .flatMap(element => Array.from(element.children)
+      .filter(child => child.localName === 'loc' && sameNamespace(child)));
 
   if (locs.length === 0) {
     result.errors.push('Sitemap contains no <loc> elements (no URLs found).');
@@ -76,13 +82,16 @@ export function parseXmlSitemap(xmlText: string): ParseResult {
 /**
  * Parses an XLSX file and extracts URLs from the first column of the first sheet.
  */
-export async function parseXlsx(file: File): Promise<ParseResult> {
+export async function parseXlsx(file: File, signal?: AbortSignal): Promise<ParseResult> {
   const result: ParseResult = { urls: [], warnings: [], errors: [] };
 
   // Load the spreadsheet engine only for an actual Excel import.
+  signal?.throwIfAborted();
   const XLSX = await import('xlsx');
+  signal?.throwIfAborted();
   const buffer = await file.arrayBuffer();
-  const workbook = XLSX.read(buffer, { type: 'array' });
+  signal?.throwIfAborted();
+  const workbook = XLSX.read(buffer, { type: 'array', sheets: 0 });
 
   if (workbook.SheetNames.length === 0) {
     result.errors.push('Excel file contains no sheets.');
@@ -96,8 +105,60 @@ export async function parseXlsx(file: File): Promise<ParseResult> {
   }
 
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
-  const rows: string[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+  // Preserve the declared first used column and initial row, including an
+  // initial blank/error cell (which must not turn a later value into a header).
+  // Project populated cells before conversion: a tiny workbook can declare a
+  // million blank rows. Walking that rectangle blocks the browser unnecessarily.
+  const reference = sheet?.['!ref'];
+  let projected = sheet;
+  if (reference) {
+    const range = XLSX.utils.decode_range(reference);
+    const coordinates = [range.s.r, range.s.c, range.e.r, range.e.c];
+    if (!/^[A-Z]+[1-9]\d*(?::[A-Z]+[1-9]\d*)?$/.test(reference)
+      || coordinates.some(value => !Number.isSafeInteger(value) || value < 0)
+      || range.e.r < range.s.r || range.e.c < range.s.c) {
+      result.errors.push('Excel sheet has an invalid cell range. Save it again as an .xlsx file and retry.');
+      return result;
+    }
+    const column = XLSX.utils.encode_col(range.s.c);
+    // Ordinary extents retain the cheaper rectangular converter. Use the
+    // populated-cell projection when the declared row walk would exceed even
+    // the encoded byte count. This is only a cost heuristic, never an input cap;
+    // both branches preserve the same values, header position and warnings.
+    if (range.e.r - range.s.r + 1 <= file.size) {
+      range.e.c = range.s.c;
+      for (let row = range.s.r; row <= range.e.r; row++) {
+        const cell = sheet[`${column}${row + 1}`];
+        if (cell?.t === 'n') delete cell.z;
+      }
+      // Keep the original first-column range without copying unrelated cells.
+      projected = sheet;
+      const rows: string[][] = XLSX.utils.sheet_to_json(projected, { header: 1, defval: '', range });
+      return extractColumn(rows, result);
+    }
+    const selected = Object.keys(sheet).flatMap(address => {
+      if (!address.startsWith(column)) return [];
+      const suffix = address.slice(column.length);
+      if (!/^[1-9]\d*$/.test(suffix)) return [];
+      const row = Number(suffix) - 1;
+      return row >= range.s.r && row <= range.e.r ? [{ row, cell: sheet[address] }] : [];
+    }).sort((a, b) => a.row - b.row);
+    // Keep one blank initial row when the first physical value starts later.
+    projected = { A1: { t: 's', v: '' } };
+    let nextRow = 0;
+    for (const { row, cell } of selected) {
+      if (nextRow === 0 && row > range.s.r) nextRow = 1;
+      // 0.20's converter honors numeric date formatting even with raw output.
+      // Preserve historical raw serials without modifying the source cell.
+      projected[`A${++nextRow}`] = cell?.t === 'n' ? { ...cell, z: undefined } : cell;
+    }
+    projected['!ref'] = `A1:A${Math.max(1, nextRow)}`;
+  }
+  const rows: string[][] = XLSX.utils.sheet_to_json(projected, { header: 1, defval: '' });
+  return extractColumn(rows, result);
+}
 
+function extractColumn(rows: string[][], result: ParseResult): ParseResult {
   if (rows.length === 0) {
     result.errors.push('Sheet is empty.');
     return result;

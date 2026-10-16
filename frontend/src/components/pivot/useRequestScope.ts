@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 
 /** Scope requests and retry keys to one mounted account resource. */
 export function useRequestScope(scope: string) {
@@ -12,7 +12,7 @@ export function useRequestScope(scope: string) {
     const current = context.current;
     return () => current.controller.abort();
   }, [scope]);
-  return {
+  return useMemo(() => ({
     signal: () => context.current.controller.signal,
     key: (intent: string) => {
       const existing = context.current.keys.get(intent);
@@ -21,5 +21,5 @@ export function useRequestScope(scope: string) {
       context.current.keys.set(intent, created);
       return created;
     },
-  };
+  }), [scope]);
 }

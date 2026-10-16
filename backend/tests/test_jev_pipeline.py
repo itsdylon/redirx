@@ -4,7 +4,7 @@ import json
 import os
 import unittest
 from unittest.mock import patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from backend.tests import test_artifact_decision_projection as fixture
 from backend.tests import test_migration_run_service as run_fixture
@@ -238,13 +238,14 @@ class JevWorkerRouting(unittest.IsolatedAsyncioTestCase):
         from contextlib import ExitStack
         from unittest.mock import Mock,AsyncMock
         from backend.worker import RedirxWorker
-        for enabled in (True,False):
+        for enabled,outcome in ((True,'succeeded'),(True,'failed'),(False,'failed')):
             with ExitStack() as stack:
                 stack.enter_context(patch.dict(os.environ,{'JEV_MVP_ENABLED':str(enabled).lower()}))
                 worker=RedirxWorker.__new__(RedirxWorker);worker.worker_id='w';worker.jobs_processed=0
                 worker._lease_extension_loop=AsyncMock();worker.session_db=Mock()
                 job={'id':str(uuid4()),'mcp_run_id':str(uuid4()),'attempt_count':1,'pipeline_type':'content'}
                 authority=stack.enter_context(patch('backend.worker.MigrationRunService')).return_value
+                authority.finalize_session.return_value={'status': outcome}
                 stack.enter_context(patch('backend.worker.DeepPreviewService'))
                 jev=stack.enter_context(patch('backend.services.jev_pipeline_service.JevService')).return_value
                 jev.state.return_value={'pass':1}
@@ -252,9 +253,16 @@ class JevWorkerRouting(unittest.IsolatedAsyncioTestCase):
                 runner=stack.enter_context(patch('backend.services.jev_runner.JevPipelineRunner')).return_value;runner.run=AsyncMock()
                 pipeline=stack.enter_context(patch('backend.worker.Pipeline',side_effect=AssertionError('content must never run')))
                 budget=stack.enter_context(patch('backend.worker.reserve_pivot_temporary_capacity'))
-                self.assertEqual(await worker.process_job(job),enabled)
+                self.assertEqual(await worker.process_job(job),enabled and outcome == 'succeeded')
+                self.assertEqual(worker.jobs_processed,int(enabled and outcome == 'succeeded'))
                 pipeline.assert_not_called();budget.assert_not_called()
-                if enabled:runner.run.assert_awaited_once()
+                if enabled:
+                    runner.run.assert_awaited_once()
+                    progress = runner.run.call_args.args[2]
+                    progress(UUID(job['id']), 2, 'Jev: propose URL mappings', 3)
+                    worker.session_db.update_session_progress_for_attempt.assert_called_once_with(
+                        UUID(job['id']), 2, 'Jev: propose URL mappings', 3, worker_id='w', attempt_count=1)
+                    worker.session_db.update_session_progress.assert_not_called()
                 else:runner.run.assert_not_awaited()
                 self.assertEqual(authority.finalize_session.call_args.args[2],'completed' if enabled else 'permanently_failed')
 

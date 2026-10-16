@@ -94,7 +94,7 @@ function AnimateIn({ delay = 0, children, className = '' }: { delay?: number; ch
  * Shown directly beneath the current target so the comparison needs no
  * clicking, and always with the evidence: a suggestion a reviewer cannot check
  * is one they should not accept. Taking it is an ordinary edit — the row is
- * repointed and approved locally, exactly as the inline editor does.
+ * repointed and approved only after the server confirms the explicit acceptance.
  */
 function RepairSuggestion({
   redirect,
@@ -122,6 +122,7 @@ function RepairSuggestion({
               size="sm"
               variant="default"
               className="h-6 px-2 text-xs"
+              disabled={!onAccept}
               onClick={() => onAccept?.(redirect.id)}
             >
               Use this
@@ -130,6 +131,7 @@ function RepairSuggestion({
               size="sm"
               variant="ghost"
               className="h-6 px-1.5 text-xs text-muted-foreground"
+              disabled={!onDismiss}
               onClick={() => onDismiss?.(redirect.id)}
             >
               <X className="mr-1 h-3 w-3" />
@@ -161,6 +163,7 @@ interface RedirectTableProps {
   isLoading?: boolean;
   pipelineType?: string;
   showTraffic?: boolean;
+  actionsDisabled?: boolean;
 }
 
 export function RedirectTable({
@@ -178,7 +181,8 @@ export function RedirectTable({
   totalRedirectsCount = 0,
   isLoading = false,
   pipelineType = 'content',
-  showTraffic = false
+  showTraffic = false,
+  actionsDisabled = false
 }: RedirectTableProps) {
   const columnCount = showTraffic ? 10 : 9;
   const isExactMatch = (redirect: RedirectMapping) =>
@@ -314,9 +318,11 @@ export function RedirectTable({
       <Table>
         <TableHeader>
           <TableRow className="bg-muted">
-            <TableHead className="w-12"></TableHead>
+            <TableHead className="w-12"><span className="sr-only">Details</span></TableHead>
             <TableHead className="w-12">
+              <span className="sr-only">Selection</span>
               <Checkbox
+                aria-label="Select all redirects on this page"
                 checked={
                   redirects.length > 0 &&
                   redirects.every((r) => selectedRows.has(r.id))
@@ -343,7 +349,7 @@ export function RedirectTable({
             <TableHead className="text-foreground w-24 text-center">Score</TableHead>
             <TableHead className="w-20 text-foreground text-center">Status</TableHead>
             <TableHead className="w-16 text-foreground text-center">Warnings</TableHead>
-            <TableHead className="w-16"></TableHead>
+            <TableHead className="w-16"><span className="sr-only">Actions</span></TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -392,6 +398,9 @@ export function RedirectTable({
               >
                 <TableCell>
                   <Button
+                    aria-label={`${expandedRow === redirect.id ? 'Collapse' : 'Expand'} details for ${redirect.oldUrl}`}
+                    aria-expanded={expandedRow === redirect.id}
+                    aria-controls={expandedRow === redirect.id ? `redirect-details-${redirect.id}` : undefined}
                     variant="ghost"
                     size="sm"
                     onClick={() => onToggleExpand(redirect.id)}
@@ -405,6 +414,7 @@ export function RedirectTable({
                 </TableCell>
                 <TableCell>
                   <Checkbox
+                    aria-label={`Select redirect from ${redirect.oldUrl}`}
                     checked={selectedRows.has(redirect.id)}
                     onCheckedChange={() => onToggleSelect(redirect.id)}
                   />
@@ -421,8 +431,8 @@ export function RedirectTable({
                   {redirect.repair && (
                     <RepairSuggestion
                       redirect={redirect}
-                      onAccept={onAcceptRepair}
-                      onDismiss={onDismissRepair}
+                      onAccept={actionsDisabled ? undefined : onAcceptRepair}
+                      onDismiss={actionsDisabled ? undefined : onDismissRepair}
                     />
                   )}
                 </TableCell>
@@ -450,6 +460,8 @@ export function RedirectTable({
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <button
+                        aria-label={`${redirect.approved ? "Remove approval for" : "Approve"} ${redirect.oldUrl}`}
+                        disabled={actionsDisabled}
                         onClick={() => onApprove(redirect.id)}
                         className={`mx-auto flex items-center justify-center rounded-md p-1 transition-colors ${
                           redirect.approved
@@ -478,6 +490,8 @@ export function RedirectTable({
                   <Button
                     variant="ghost"
                     size="sm"
+                    aria-label={`Edit redirect for ${redirect.oldUrl}`}
+                    disabled={actionsDisabled}
                     onClick={() => onEdit(redirect)}
                   >
                     <Edit2 className="h-4 w-4" />
@@ -487,7 +501,7 @@ export function RedirectTable({
 
               {/* Expanded Row Details */}
               {expandedRow === redirect.id && (
-                <TableRow className="bg-muted">
+                <TableRow id={`redirect-details-${redirect.id}`} className="bg-muted">
                   <TableCell colSpan={columnCount} className="p-6">
                     <AnimateIn>
                       {/* Full URLs */}
@@ -517,14 +531,18 @@ export function RedirectTable({
                             <Button
                               variant={redirect.approved ? "outline" : "default"}
                               size="sm"
-                              onClick={() => onApprove(redirect.id)}
+                              aria-label={`${redirect.approved ? "Remove approval for" : "Approve"} ${redirect.oldUrl}`}
+                        disabled={actionsDisabled}
+                        onClick={() => onApprove(redirect.id)}
                             >
                               {redirect.approved ? 'Unapprove Match' : 'Approve Match'}
                             </Button>
                             <Button
                               variant="outline"
                               size="sm"
-                              onClick={() => onEdit(redirect)}
+                              aria-label={`Edit redirect for ${redirect.oldUrl}`}
+                    disabled={actionsDisabled}
+                    onClick={() => onEdit(redirect)}
                             >
                               Edit Mapping
                             </Button>
@@ -586,14 +604,18 @@ export function RedirectTable({
                             <Button
                               variant={redirect.approved ? "outline" : "default"}
                               size="sm"
-                              onClick={() => onApprove(redirect.id)}
+                              aria-label={`${redirect.approved ? "Remove approval for" : "Approve"} ${redirect.oldUrl}`}
+                        disabled={actionsDisabled}
+                        onClick={() => onApprove(redirect.id)}
                             >
                               {redirect.approved ? 'Unapprove Match' : 'Approve Match'}
                             </Button>
                             <Button
                               variant="outline"
                               size="sm"
-                              onClick={() => onEdit(redirect)}
+                              aria-label={`Edit redirect for ${redirect.oldUrl}`}
+                    disabled={actionsDisabled}
+                    onClick={() => onEdit(redirect)}
                             >
                               Edit Mapping
                             </Button>
@@ -601,7 +623,9 @@ export function RedirectTable({
                               <Button
                                 variant="outline"
                                 size="sm"
-                                onClick={() => onEdit(redirect)}
+                                aria-label={`Edit redirect for ${redirect.oldUrl}`}
+                    disabled={actionsDisabled}
+                    onClick={() => onEdit(redirect)}
                               >
                                 View Alternatives
                               </Button>

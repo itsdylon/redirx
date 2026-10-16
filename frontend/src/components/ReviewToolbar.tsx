@@ -23,6 +23,7 @@ interface ReviewToolbarProps {
   confidenceFilter: string;
   onConfidenceFilterChange: (filter: string) => void;
   onExportClick: () => void;
+  exportDisabled?: boolean;
   sortOption: string;
   onSortChange: (value: string) => void;
   showExactMatches: boolean;
@@ -40,6 +41,7 @@ export function ReviewToolbar({
   confidenceFilter,
   onConfidenceFilterChange,
   onExportClick,
+  exportDisabled = false,
   sortOption,
   onSortChange,
   showExactMatches,
@@ -53,9 +55,10 @@ export function ReviewToolbar({
   return (
     <div className="bg-card border border-border p-4 flex items-center gap-4 flex-wrap">
       {/* Search Bar */}
-      <div className="flex-1 relative">
+      <div className="flex-1 min-w-[180px] relative">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
         <Input
+          aria-label="Search old or new URLs"
           ref={searchInputRef}
           type="text"
           placeholder="Search old or new URLs..."
@@ -63,21 +66,21 @@ export function ReviewToolbar({
           onChange={(e) => onSearchChange(e.target.value)}
           className="pl-10 pr-20"
         />
-        <kbd className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none hidden sm:inline-flex h-5 items-center gap-1 rounded border border-border bg-muted px-1.5 font-mono text-[10px] font-medium text-muted-foreground">
+        <kbd className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none hidden sm:inline-flex h-5 items-center gap-1 rounded border border-border bg-muted px-1.5 font-mono text-[10px] font-medium text-foreground">
           {formatShortcut('K')}
         </kbd>
       </div>
 
       {/* Confidence Filter */}
       <Select value={confidenceFilter} onValueChange={onConfidenceFilterChange}>
-        <SelectTrigger className="w-[180px]">
+        <SelectTrigger aria-label="Filter by confidence" className="w-[180px]">
           <SelectValue placeholder="Confidence" />
         </SelectTrigger>
         <SelectContent>
           <SelectItem value="all">All Confidence</SelectItem>
           <SelectItem value="high">High (≥85%)</SelectItem>
-          <SelectItem value="medium">Medium (60-85%)</SelectItem>
-          <SelectItem value="low">Low (&lt;60%)</SelectItem>
+          <SelectItem value="medium">Medium (65-85%)</SelectItem>
+          <SelectItem value="low">Low (&lt;65%)</SelectItem>
         </SelectContent>
       </Select>
 
@@ -96,7 +99,7 @@ export function ReviewToolbar({
 
       {/* Sort Options */}
       <Select value={sortOption} onValueChange={onSortChange}>
-        <SelectTrigger className="w-[180px]">
+        <SelectTrigger aria-label="Sort redirects" className="w-[180px]">
           <SelectValue placeholder="Sort by" />
         </SelectTrigger>
         <SelectContent>
@@ -126,6 +129,7 @@ export function ReviewToolbar({
           <Button
             variant="outline"
             onClick={onExportClick}
+            disabled={exportDisabled}
             className={tutorialExportHighlight ? 'border-[#26D99D] text-[#0B6B4C] dark:text-[#D8FFF2] ring-2 ring-[#26D99D]/80 ring-offset-2 ring-offset-background bg-[#26D99D]/10 dark:bg-[#26D99D]/18' : ''}
           >
             <Download className="h-4 w-4 mr-2" />

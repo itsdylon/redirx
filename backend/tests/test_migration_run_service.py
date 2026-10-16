@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
+from backend.tests.helpers.disposable_postgres import validate_disposable_postgres_dsn
 
 from backend.services.migration_run_service import MigrationRunService
 from backend.services.migration_quote_service import MigrationQuoteService, PaymentRequiredError, QuoteNotReadyError
@@ -40,9 +41,8 @@ class RunDatabaseAcceptance(unittest.TestCase):
         import psycopg
         from psycopg import sql
         cls.admin_dsn=os.environ['PREFLIGHT_TEST_DATABASE_URL']
+        validate_disposable_postgres_dsn(cls.admin_dsn)
         parsed=urlsplit(cls.admin_dsn)
-        if parsed.hostname not in ('127.0.0.1','localhost','::1'):
-            raise RuntimeError('Run acceptance requires a local disposable PostgreSQL instance.')
         cls.database='redirx_run_test_'+uuid4().hex
         with psycopg.connect(cls.admin_dsn,autocommit=True) as conn:
             conn.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(cls.database)))
@@ -370,7 +370,7 @@ class WorkerDispatchTests(unittest.IsolatedAsyncioTestCase):
             events.append('authorize')
             return {'migration_id': str(uuid4())}
         service.authorize_dispatch.side_effect=authorize
-        service.finalize_session.side_effect=lambda *_: events.append('finalize')
+        service.finalize_session.side_effect=lambda *_: (events.append('finalize') or {'status': 'succeeded'})
         async def steps(): yield None
         pipeline=SimpleNamespace(total_stages=1,stage_names=['fixture'],current_stage_index=1,iterate=steps)
         def construct(**kwargs): events.append('pipeline'); return pipeline

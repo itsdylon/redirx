@@ -50,7 +50,9 @@ def validate_response(result, questions):
                 raise ProviderUnavailable('provider_response_invalid')
             for field in (('confidence',) if question['type']=='choice' else ('confidence','score')):
                 value=answer.get(field)
-                if type(value) not in (int,float) or not math.isfinite(value): raise ProviderUnavailable('provider_response_invalid')
+                if (type(value) not in (int,float) or not math.isfinite(value)
+                        or (field=='confidence' and not 0<=value<=1)):
+                    raise ProviderUnavailable('provider_response_invalid')
 
 
 _DIAGNOSTIC_STAGES = frozenset({'request_prepare','cache_lookup','budget_reservation',

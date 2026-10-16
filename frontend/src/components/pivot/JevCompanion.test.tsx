@@ -1,10 +1,12 @@
+vi.mock('../../contexts/AuthContext', () => ({ useAuth: () => ({ user: { id: 'owner-fixture' } }) }));
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import { PivotMigrationDetail } from '../PivotMigrationDetail';
 import { PivotCompanionPage } from '../PivotCompanionPage';
+vi.mock('../../contexts/AuthContext', () => ({ useAuth: () => ({ user: { id: 'fixture-owner' } }) }));
 vi.mock('../ToolLayout', () => ({ ToolLayout: ({ children }: { children: ReactNode }) => <>{children}</> }));
 const envelope = (data: unknown, changes = {}) => ({ contract_version: '1.0.0', migration_id: 'm1', operation_id: 'op1', status: 'succeeded', next_action: 'none', data, error: null, ...changes });
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), {status, headers:{'Content-Type':'application/json'}});
@@ -40,12 +42,23 @@ describe('free Jev companion with actual API transport',()=>{
     : { migration_id: 'm1' });
  });
 
+ it.each([true, false])('waits for the migration type before loading historical controls (Jev=%s)',async(jev)=>{
+  let resolve!: (response:Response)=>void;
+  vi.stubGlobal('fetch',vi.fn(()=>new Promise<Response>(done=>{resolve=done;})));
+  mount();
+  expect(screen.getByText('Loading migration status…')).toBeInTheDocument();
+  expect(screen.queryByRole('heading',{name:'Search Console'})).not.toBeInTheDocument();
+  await act(async()=>resolve(json(envelope({migration:{id:'m1',name:'Loaded migration'},...(jev?{jev:{engine:'jev-url-v1',model:'jev',pass:1,seed_revision:0,limits}}:{})}))));
+  await screen.findByRole('heading',{name:'Loaded migration'});
+  if(jev)expect(screen.queryByRole('heading',{name:'Search Console'})).not.toBeInTheDocument();
+  else expect(await screen.findByRole('heading',{name:'Search Console'})).toBeInTheDocument();
+ });
  it('labels model proposals and saves confirmation only through revision-bound set_target',async()=>{
   const user=userEvent.setup();mount();await screen.findByText('Proposed destination: https://new.test/a');
   expect(screen.getByRole('heading',{name:'Free URL mapping'})).toBeInTheDocument();
   expect(screen.queryByText('Free Jev URL mapping')).not.toBeInTheDocument();
   expect(screen.getByText(/Model estimate: 84.0%/)).toBeInTheDocument();
-  expect(screen.queryByRole('button',{name:'Approve',exact:true})).not.toBeInTheDocument();
+  expect(screen.queryByRole('button',{name:'Approve'})).not.toBeInTheDocument();
   expect(screen.queryByText('Payment required')).not.toBeInTheDocument();expect(screen.queryByText('Monitoring')).not.toBeInTheDocument();
   expect(calls.some(c=>c.method==='PATCH')).toBe(false);
   await user.click(screen.getByRole('button',{name:'Confirm proposed destination'}));

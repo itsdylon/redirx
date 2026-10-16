@@ -2,7 +2,7 @@
 {% block title %}Welcome to RedirX{% endblock %}
 {% block content %}
 <h2 style="margin:0 0 16px;font-size:22px;color:#18181b;">Welcome to RedirX{{ ', ' + user_name if user_name else '' }}.</h2>
-<p style="font-size:15px;line-height:1.6;color:#52525b;">Connect RedirX to your agent and tell it which site you are migrating. Your agent can collect URLs, match page content, and bring uncertain destinations back for your decision.</p>
-<p style="font-size:15px;line-height:1.6;color:#52525b;">You approve any purchase and installation. Exporting a file does not install it; check the verification results after deployment.</p>
-<p style="font-size:15px;line-height:1.6;"><a href="{{ app_url }}/companion" style="color:#166534;">Open your migration companion</a> for connection instructions, recent migrations, account settings, and billing.</p>
+<p style="font-size:15px;line-height:1.6;color:#52525b;">Connect RedirX to your agent and tell it which site you are migrating. Import old and new URL inventories, compare proposed destinations, and decide which redirects to approve.</p>
+<p style="font-size:15px;line-height:1.6;color:#52525b;">Each proposed mapping needs your explicit approval. Exporting a file does not install it; check the verification results after deployment.</p>
+<p style="font-size:15px;line-height:1.6;"><a href="{{ app_url }}/companion" style="color:#166534;">Open your migration companion</a> for connection instructions, recent migrations, and account settings.</p>
 {% endblock %}

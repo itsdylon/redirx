@@ -1,716 +1,129 @@
-import { useState } from 'react';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from './ui/dialog';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { Checkbox } from './ui/checkbox';
 import { Label } from './ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from './ui/select';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Alert, AlertDescription } from './ui/alert';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collapsible';
-import { Separator } from './ui/separator';
-import { AlertTriangle, CheckCircle, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
+import { previewExport, fetchExportFile, type ExportOptions, type ExportPreview } from '../api/exportAPI';
+import { normalizeLegacyExportFormat, startTextDownload } from '../lib/legacyExport';
 import type { RedirectMapping } from './ReviewInterface';
 
 interface ExportModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onExport: (format: string, confidenceLevels: string[]) => void;
+  onExport: (format: string, confidenceLevels: string[]) => void | Promise<void>;
   redirects: RedirectMapping[];
+  sessionId: string;
 }
 
-export function ExportModal({ open, onOpenChange, onExport, redirects }: ExportModalProps) {
-  const [format, setFormat] = useState<string>(() =>
-    localStorage.getItem('redirx_default_export_format') || ''
-  );
-  const [includeHigh, setIncludeHigh] = useState(() =>
-    localStorage.getItem('redirx_default_confidence_high') !== 'false'
-  );
-  const [includeMedium, setIncludeMedium] = useState(() =>
-    localStorage.getItem('redirx_default_confidence_medium') !== 'false'
-  );
-  const [includeLow, setIncludeLow] = useState(() =>
-    localStorage.getItem('redirx_default_confidence_low') === 'true'
-  );
-  const [previewExpanded, setPreviewExpanded] = useState(false);
-  const [isDownloading, setIsDownloading] = useState(false);
-  const [showDuplicateDetails, setShowDuplicateDetails] = useState(false);
-
-  // URL format options
-  const [urlFormat, setUrlFormat] = useState<'paths' | 'full' | 'custom'>(() => {
-    const saved = localStorage.getItem('redirx_default_url_format');
-    return (saved === 'paths' || saved === 'full') ? saved : 'paths';
-  });
+export function ExportModal({ open, onOpenChange, onExport, redirects, sessionId }: ExportModalProps) {
+  const [format, setFormat] = useState(() => normalizeLegacyExportFormat(localStorage.getItem('redirx_default_export_format')));
+  const [includeHigh, setIncludeHigh] = useState(() => localStorage.getItem('redirx_default_confidence_high') !== 'false');
+  const [includeMedium, setIncludeMedium] = useState(() => localStorage.getItem('redirx_default_confidence_medium') !== 'false');
+  const [includeLow, setIncludeLow] = useState(() => localStorage.getItem('redirx_default_confidence_low') === 'true');
+  const [urlFormat, setUrlFormat] = useState<'paths' | 'full' | 'custom'>(() => localStorage.getItem('redirx_default_url_format') === 'full' ? 'full' : 'paths');
   const [customOldDomain, setCustomOldDomain] = useState('');
   const [customNewDomain, setCustomNewDomain] = useState('');
+  const [previewExpanded, setPreviewExpanded] = useState(false);
+  const [preview, setPreview] = useState<ExportPreview | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [refresh, setRefresh] = useState(0);
+  const active = useRef(true);
+  const downloadLock = useRef(false);
+  const downloadController = useRef<AbortController | null>(null);
+  const returnFocus = useRef<HTMLElement | null>(null);
+  const options = useMemo<ExportOptions>(() => ({ format, urlFormat,
+    confidenceLevels: [...(includeHigh ? ['high'] : []), ...(includeMedium ? ['medium'] : []), ...(includeLow ? ['low'] : [])],
+    oldDomain: customOldDomain, newDomain: customNewDomain,
+  }), [format, urlFormat, includeHigh, includeMedium, includeLow, customOldDomain, customNewDomain]);
+  useEffect(() => { active.current = true; return () => { active.current = false; downloadController.current?.abort(); }; }, []);
+  useEffect(() => {
+    setPreview(null); setError(null);
+    if (!open || !format || !options.confidenceLevels.length) { setLoading(false); return; }
+    const controller = new AbortController();
+    setLoading(true);
+    const timer = setTimeout(() => {
+      void previewExport(sessionId, options, controller.signal).then(data => {
+        if (!controller.signal.aborted) setPreview(data);
+      }).catch(error => {
+        if (!controller.signal.aborted) setError(error instanceof Error ? error.message : 'Preview could not load. Try again.');
+      }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    }, 200);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [open, sessionId, options, refresh]);
 
-  // Live counts from actual data
-  const totalHigh = redirects.filter((r) => r.confidenceBand === 'high').length;
-  const totalMedium = redirects.filter((r) => r.confidenceBand === 'medium').length;
-  const totalLow = redirects.filter((r) => r.confidenceBand === 'low').length;
-
-  // Count exact matches for display
-  const exactMatchCount = redirects.filter((r) => r.matchType === 'exact_url').length;
-
-  // Apply confidence filters and exclude exact URL matches (identical paths don't need redirects)
-  const filteredRedirects = redirects.filter((r) => {
-    if (r.matchType === 'exact_url') return false;
-    if (r.confidenceBand === 'high' && !includeHigh) return false;
-    if (r.confidenceBand === 'medium' && !includeMedium) return false;
-    if (r.confidenceBand === 'low' && !includeLow) return false;
-    if (!r.oldUrl || !r.newUrl) return false;
-    return true;
-  });
-
-  const selectedCount = filteredRedirects.length;
-
-  // Warnings: unapproved high-confidence redirects in the export set
-  const unapprovedHigh = filteredRedirects.filter(
-    (r) => r.confidenceBand === 'high' && !r.approved
-  ).length;
-
-  const hasWarnings = unapprovedHigh > 0;
-
-  // Duplicate targets in the export set
-  const duplicateTargets = (() => {
-    const counts = new Map<string, number>();
-    for (const r of filteredRedirects) {
-      const key = r.newUrl;
-      if (!key) continue;
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-    let dupCount = 0;
-    counts.forEach((c) => {
-      if (c > 1) dupCount += 1; // number of target URLs that are duplicated
-    });
-    return dupCount;
-  })();
-
-  const hasDuplicates = duplicateTargets > 0;
-
-  // Validate custom domains
-  const customDomainErrors: string[] = [];
-  if (urlFormat === 'custom') {
-    if (customOldDomain) {
-      try {
-        new URL(customOldDomain);
-      } catch {
-        customDomainErrors.push('Old domain must be a valid URL (e.g., https://example.com)');
+  async function handleDownload() {
+    if (!preview || !preview.included_count || downloadLock.current || loading) return;
+    downloadLock.current = true; setIsDownloading(true); setError(null);
+    const controller = new AbortController(); downloadController.current = controller;
+    try {
+      const content = await fetchExportFile(sessionId, options, controller.signal);
+      if (!active.current || controller.signal.aborted) return;
+      if (content !== preview.content) {
+        setPreview(null);
+        setError('The saved redirects changed after this preview. Refresh the preview and review it before downloading.');
+        return;
       }
-    }
-    if (customNewDomain) {
-      try {
-        new URL(customNewDomain);
-      } catch {
-        customDomainErrors.push('New domain must be a valid URL (e.g., https://example.com)');
-      }
+      startTextDownload(content, preview.filename);
+      toast.success(`Download started: ${preview.filename}`);
+      onOpenChange(false);
+      void Promise.resolve().then(() => { if (active.current) return onExport(format, options.confidenceLevels); }).catch(() => {
+        if (active.current) toast.info('Download started, but progress could not be updated.');
+      });
+    } catch (error) {
+      if (active.current && !controller.signal.aborted) setError(error instanceof Error ? error.message : 'Download could not start. Try again.');
+    } finally {
+      downloadLock.current = false;
+      if (active.current) setIsDownloading(false);
     }
   }
-
-  const hasCustomDomainErrors = customDomainErrors.length > 0;
-
-  // URL transformation helper
-  const transformUrl = (url: string, type: 'old' | 'new'): string => {
-    if (urlFormat === 'full') {
-      return url; // Current behavior - keep full URLs
-    }
-
-    if (urlFormat === 'paths') {
-      // Extract path only
-      try {
-        const parsedUrl = new URL(url);
-        return parsedUrl.pathname;
-      } catch {
-        return url; // Fallback if URL is invalid
-      }
-    }
-
-    if (urlFormat === 'custom') {
-      // Replace domain with custom domain
-      try {
-        const parsedUrl = new URL(url);
-        const customDomain = type === 'old' ? customOldDomain : customNewDomain;
-
-        if (customDomain) {
-          const customParsed = new URL(customDomain);
-          parsedUrl.protocol = customParsed.protocol;
-          parsedUrl.host = customParsed.host;
-          return parsedUrl.href;
-        }
-
-        return url;
-      } catch {
-        return url; // Fallback if parsing fails
-      }
-    }
-
-    return url;
-  };
-
-  // Single source of truth for export + preview content
-  const buildExportContent = (fmt: string, rules: RedirectMapping[], limitPreview = false): string => {
-    if (!fmt) return 'Select a format to preview rules';
-    if (rules.length === 0) return 'No redirects match the selected confidence levels.';
-
-    // Limit to first 10 redirects for preview
-    const displayRules = limitPreview ? rules.slice(0, 10) : rules;
-    const hasMore = limitPreview && rules.length > 10;
-
-    let content = '';
-
-    switch (fmt) {
-      case 'apache':
-        // .htaccess style: Redirect 301 /old /new
-        content = displayRules
-          .map((r) => {
-            const oldPath = transformUrl(r.oldUrl, 'old');
-            const newPath = transformUrl(r.newUrl, 'new');
-            return `Redirect 301 ${oldPath} ${newPath}`;
-          })
-          .join('\n');
-        break;
-
-      case 'nginx':
-        // Nginx map: map $uri $new_uri { /old /new; ... }
-        content = [
-          'map $uri $new_uri {',
-          ...displayRules.map((r) => {
-            const oldPath = transformUrl(r.oldUrl, 'old');
-            const newPath = transformUrl(r.newUrl, 'new');
-            return `    ${oldPath} ${newPath};`;
-          }),
-          '}',
-        ].join('\n');
-        break;
-
-      case 'wordpress':
-        // WordPress Redirection CSV: /old,/new,301
-        content = displayRules
-          .map((r) => {
-            const oldPath = transformUrl(r.oldUrl, 'old');
-            const newPath = transformUrl(r.newUrl, 'new');
-            return `${oldPath},${newPath},301`;
-          })
-          .join('\n');
-        break;
-
-      case 'vercel':
-        // Vercel redirects: vercel.json format
-        {
-          const redirectEntries = displayRules.map((r) => {
-            const oldPath = transformUrl(r.oldUrl, 'old');
-            const newPath = transformUrl(r.newUrl, 'new');
-            return `    { "source": ${JSON.stringify(oldPath)}, "destination": ${JSON.stringify(newPath)}, "permanent": true }`;
-          });
-          content = `{\n  "redirects": [\n${redirectEntries.join(',\n')}\n  ]\n}`;
-        }
-        break;
-
-      case 'cloudflare':
-        // Cloudflare Pages _redirects file: /old /new 301
-        content = displayRules
-          .map((r) => {
-            const oldPath = transformUrl(r.oldUrl, 'old');
-            const newPath = transformUrl(r.newUrl, 'new');
-            return `${oldPath} ${newPath} 301`;
-          })
-          .join('\n');
-        break;
-
-      case 'shopify':
-        // Shopify bulk redirect CSV
-        content = 'Redirect from,Redirect to\n' + displayRules
-          .map((r) => {
-            const oldPath = transformUrl(r.oldUrl, 'old');
-            const newPath = transformUrl(r.newUrl, 'new');
-            return `${oldPath},${newPath}`;
-          })
-          .join('\n');
-        break;
-
-      default:
-        return 'Select a format to preview rules';
-    }
-
-    if (hasMore) {
-      content += `\n\n... and ${rules.length - 10} more redirects`;
-    }
-
-    return content;
-  };
-
-  const previewContent = buildExportContent(format, filteredRedirects, true);
-
-  // Contextual warning for problematic format + URL format combinations
-  const getUrlFormatWarning = (): string | null => {
-    if (!format) return null;
-
-    const pathOnlyFormats: Record<string, string> = {
-      apache: 'Apache .htaccess expects paths for the source URL — full URLs will be ignored by the server.',
-      nginx: "Nginx map matches against the request path — full URLs in the source won't match.",
-      cloudflare: "Cloudflare _redirects expects relative paths — full URLs in the source won't match.",
-      shopify: 'Shopify redirects require paths only — full URLs will be rejected.',
-      vercel: "Vercel source patterns match against paths — full URLs won't route correctly.",
-    };
-
-    if (urlFormat === 'full' && pathOnlyFormats[format]) {
-      return pathOnlyFormats[format];
-    }
-
-    if (urlFormat === 'custom' && customOldDomain && pathOnlyFormats[format]) {
-      return pathOnlyFormats[format];
-    }
-
-    return null;
-  };
-
-  const urlFormatWarning = getUrlFormatWarning();
-
-  const handleDownload = async () => {
-    if (!format || selectedCount === 0) return;
-
-    setIsDownloading(true);
-
-    try {
-      const confidenceLevels: string[] = [];
-      if (includeHigh) confidenceLevels.push('high');
-      if (includeMedium) confidenceLevels.push('medium');
-      if (includeLow) confidenceLevels.push('low');
-
-      // Use the same content as the preview
-      const content = buildExportContent(format, filteredRedirects);
-
-      const fileName =
-        format === 'apache'
-          ? 'redirects.htaccess'
-          : format === 'nginx'
-          ? 'redirects_nginx.conf'
-          : format === 'wordpress'
-          ? 'redirects_wordpress.csv'
-          : format === 'vercel'
-          ? 'vercel.json'
-          : format === 'cloudflare'
-          ? '_redirects'
-          : format === 'shopify'
-          ? 'shopify_redirects.csv'
-          : 'redirects.txt';
-
-      // Create a blob and trigger a download
-      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-      const url = window.URL.createObjectURL(blob);
-
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = fileName;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-
-      window.URL.revokeObjectURL(url);
-
-      // Show success toast
-      toast.success(`${fileName} downloaded successfully`, {
-        duration: 3000,
-      });
-
-      // Still call onExport so your parent can show toasts, analytics, etc.
-      onExport(format, confidenceLevels);
-      onOpenChange(false);
-    } catch (error) {
-      // Handle specific error types
-      if (error instanceof DOMException) {
-        if (error.name === 'SecurityError') {
-          toast.error('Download blocked by browser security settings', {
-            description: 'Please check your browser permissions and try again.',
-            duration: 5000,
-          });
-        } else if (error.name === 'QuotaExceededError') {
-          toast.error('Not enough disk space', {
-            description: 'Please free up disk space and try again.',
-            duration: 5000,
-          });
-        } else {
-          toast.error('Download failed', {
-            description: `Browser error: ${error.message}. Please try again.`,
-            duration: 5000,
-          });
-        }
-      } else if (error instanceof Error) {
-        toast.error('Download failed', {
-          description: error.message || 'An unexpected error occurred. Please try again.',
-          duration: 5000,
-        });
-      } else {
-        toast.error('Download failed', {
-          description: 'An unexpected error occurred. Please try again.',
-          duration: 5000,
-        });
-      }
-
-      console.error('Export download error:', error);
-    } finally {
-      setIsDownloading(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
-        <div className="flex-1 overflow-y-auto min-h-0">
-        {/* Header */}
-        <DialogHeader>
-          <DialogTitle>Export Redirects</DialogTitle>
-          <DialogDescription>
-            Configure export format and select which redirects to include in your download.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-6 py-4">
-          {/* Format Selection */}
-          <div>
-            <Label className="text-foreground mb-2 block">Export Format</Label>
-            <Select value={format} onValueChange={setFormat}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select Format" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="apache">Apache .htaccess</SelectItem>
-                <SelectItem value="nginx">Nginx map</SelectItem>
-                <SelectItem value="wordpress">WordPress Redirection CSV</SelectItem>
-                <SelectItem value="vercel">Vercel redirects (vercel.json)</SelectItem>
-                <SelectItem value="cloudflare">Cloudflare Pages (_redirects)</SelectItem>
-                <SelectItem value="shopify">Shopify CSV</SelectItem>
-              </SelectContent>
+  const requestedRows = redirects.filter(row => options.confidenceLevels.includes(row.confidenceBand));
+  const unapproved = requestedRows.filter(row => !row.approved).length;
+  const duplicateTargets = new Set(requestedRows.filter((row,index,rows) => rows.findIndex(other => other.newUrl === row.newUrl) !== index).map(row => row.newUrl)).size;
+  const validSelection = !!format && !!options.confidenceLevels.length;
+  return <Dialog open={open} onOpenChange={value => { if (!downloadLock.current) onOpenChange(value); }}>
+    <DialogContent className="sm:max-w-4xl max-h-[90vh] flex flex-col overflow-hidden"
+      onOpenAutoFocus={() => { returnFocus.current = document.activeElement as HTMLElement; }}
+      onCloseAutoFocus={event => { event.preventDefault(); returnFocus.current?.focus(); }}>
+      <div className="flex-1 overflow-y-auto min-h-0">
+        <DialogHeader><DialogTitle>Export Redirects</DialogTitle><DialogDescription>Preview saved redirects after the server’s review and export checks, then download the same rules.</DialogDescription></DialogHeader>
+        <fieldset disabled={isDownloading} className="space-y-6 py-4 min-w-0">
+          <div><Label htmlFor="export-format" className="mb-2 block">Export Format</Label>
+            <Select value={format} onValueChange={setFormat} disabled={isDownloading}><SelectTrigger id="export-format"><SelectValue placeholder="Select Format" /></SelectTrigger>
+              <SelectContent><SelectItem value="apache">Apache .htaccess</SelectItem><SelectItem value="nginx">Nginx server rules</SelectItem><SelectItem value="wordpress">WordPress Redirection CSV</SelectItem><SelectItem value="vercel">Vercel redirects (vercel.json)</SelectItem><SelectItem value="cloudflare">Cloudflare Pages (_redirects)</SelectItem><SelectItem value="shopify">Shopify CSV</SelectItem><SelectItem value="csv">Review CSV</SelectItem><SelectItem value="json">Review JSON</SelectItem></SelectContent>
             </Select>
           </div>
-
-          <Separator />
-
-          {/* URL Format Selection */}
-          <div>
-            <Label className="text-foreground mb-3 block font-medium">URL Format</Label>
-            <div className="space-y-3">
-              {/* Paths Only */}
-              <div className="flex items-start space-x-3">
-                <input
-                  type="radio"
-                  id="url-paths"
-                  name="urlFormat"
-                  checked={urlFormat === 'paths'}
-                  onChange={() => setUrlFormat('paths')}
-                  className="mt-1"
-                />
-                <div className="flex-1">
-                  <label htmlFor="url-paths" className="text-sm font-medium text-foreground cursor-pointer">
-                    Paths only (Recommended)
-                  </label>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    Export: <code className="bg-muted px-1 rounded">/old-path</code> → <code className="bg-muted px-1 rounded">/new-path</code>
-                  </p>
-                </div>
-              </div>
-
-              {/* Full URLs */}
-              <div className="flex items-start space-x-3">
-                <input
-                  type="radio"
-                  id="url-full"
-                  name="urlFormat"
-                  checked={urlFormat === 'full'}
-                  onChange={() => setUrlFormat('full')}
-                  className="mt-1"
-                />
-                <div className="flex-1">
-                  <label htmlFor="url-full" className="text-sm font-medium text-foreground cursor-pointer">
-                    Full URLs from CSV
-                  </label>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    Export: <code className="bg-muted px-1 rounded text-xs">http://staging.com/old</code> → <code className="bg-muted px-1 rounded text-xs">http://staging.com/new</code>
-                  </p>
-                </div>
-              </div>
-
-              {/* Custom Domains */}
-              <div className="flex items-start space-x-3">
-                <input
-                  type="radio"
-                  id="url-custom"
-                  name="urlFormat"
-                  checked={urlFormat === 'custom'}
-                  onChange={() => setUrlFormat('custom')}
-                  className="mt-1"
-                />
-                <div className="flex-1">
-                  <label htmlFor="url-custom" className="text-sm font-medium text-foreground cursor-pointer">
-                    Custom domains
-                  </label>
-                  <p className="text-xs text-muted-foreground mt-0.5 mb-2">
-                    Replace staging domains with production domains
-                  </p>
-
-                  {urlFormat === 'custom' && (
-                    <div className="space-y-2 mt-2">
-                      <div>
-                        <Label htmlFor="custom-old" className="text-xs text-muted-foreground">Old domain (optional)</Label>
-                        <input
-                          id="custom-old"
-                          type="text"
-                          placeholder="https://example.com"
-                          value={customOldDomain}
-                          onChange={(e) => setCustomOldDomain(e.target.value)}
-                          className="w-full border border-border rounded px-2 py-1 text-sm mt-1 bg-background text-foreground"
-                        />
-                      </div>
-                      <div>
-                        <Label htmlFor="custom-new" className="text-xs text-muted-foreground">New domain (optional)</Label>
-                        <input
-                          id="custom-new"
-                          type="text"
-                          placeholder="https://example.com"
-                          value={customNewDomain}
-                          onChange={(e) => setCustomNewDomain(e.target.value)}
-                          className="w-full border border-border rounded px-2 py-1 text-sm mt-1 bg-background text-foreground"
-                        />
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <Separator />
-
-          {/* URL Format Warning */}
-          {urlFormatWarning && (
-            <Alert className="border-yellow-500/50 bg-yellow-500/10">
-              <AlertTriangle className="h-4 w-4 text-yellow-600" />
-              <AlertDescription className="text-foreground">
-                {urlFormatWarning}
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {/* Confidence Level Selection */}
-          <div>
-            <Label className="text-foreground mb-3 block">Confidence Levels to Include</Label>
-            <div className="space-y-3">
-              <div className="flex items-center space-x-2">
-                <Checkbox
-                  id="high"
-                  checked={includeHigh}
-                  onCheckedChange={(checked) => setIncludeHigh(!!checked)}
-                />
-                <Label htmlFor="high" className="text-foreground cursor-pointer">
-                  Include High Confidence ({totalHigh} redirects)
-                </Label>
-              </div>
-              <div className="flex items-center space-x-2">
-                <Checkbox
-                  id="medium"
-                  checked={includeMedium}
-                  onCheckedChange={(checked) => setIncludeMedium(!!checked)}
-                />
-                <Label htmlFor="medium" className="text-foreground cursor-pointer">
-                  Include Medium Confidence ({totalMedium} redirects)
-                </Label>
-              </div>
-              <div className="flex items-center space-x-2">
-                <Checkbox
-                  id="low"
-                  checked={includeLow}
-                  onCheckedChange={(checked) => setIncludeLow(!!checked)}
-                />
-                <Label htmlFor="low" className="text-foreground cursor-pointer">
-                  Include Low Confidence ({totalLow} redirects)
-                </Label>
-              </div>
-            </div>
-          </div>
-
-          {/* Live Count Display */}
-          <div className="border border-border bg-muted p-4 space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-muted-foreground">Redirects to export:</span>
-              <span className="text-foreground">{selectedCount}</span>
-            </div>
-            {exactMatchCount > 0 && (
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-muted-foreground">
-                  {exactMatchCount} exact URL match{exactMatchCount !== 1 ? 'es' : ''} excluded (identical paths don't need redirects)
-                </span>
-              </div>
-            )}
-          </div>
-
-          {/* Warning for Unapproved High-Confidence */}
-          {hasWarnings && (
-            <Alert variant="destructive">
-              <AlertTriangle className="h-4 w-4" />
-              <AlertDescription>
-                {unapprovedHigh} high-confidence redirects in this export are unapproved. Review or
-                override before using in production.
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {/* Duplicate Warnings */}
-          {hasDuplicates && (
-            <Alert className="border-yellow-500/50 bg-yellow-500/10">
-              <AlertTriangle className="h-4 w-4 text-yellow-600" />
-              <AlertDescription className="text-foreground">
-                <div>
-                  Warning: {duplicateTargets} target URL
-                  {duplicateTargets > 1 ? 's are' : ' is'} used by multiple redirects in this export.{' '}
-                  <button
-                    className="underline hover:text-foreground"
-                    onClick={() => setShowDuplicateDetails(!showDuplicateDetails)}
-                  >
-                    {showDuplicateDetails ? 'Hide Details' : 'View Details'}
-                  </button>
-                </div>
-                {showDuplicateDetails && (
-                  <div className="mt-3 space-y-2">
-                    {(() => {
-                      const counts = new Map<string, string[]>();
-                      for (const r of filteredRedirects) {
-                        if (!r.newUrl) continue;
-                        const existing = counts.get(r.newUrl) || [];
-                        existing.push(r.oldUrl);
-                        counts.set(r.newUrl, existing);
-                      }
-                      const dupes: { target: string; sources: string[] }[] = [];
-                      counts.forEach((sources, target) => {
-                        if (sources.length > 1) dupes.push({ target, sources });
-                      });
-                      return dupes.map(({ target, sources }) => (
-                        <div key={target} className="text-sm border border-yellow-500/30 bg-yellow-500/5 p-2 rounded">
-                          <div className="font-mono text-xs text-foreground mb-1 truncate">{target}</div>
-                          <div className="text-muted-foreground text-xs">
-                            Target of {sources.length} redirects:{' '}
-                            {sources.map((s, i) => (
-                              <span key={i}>
-                                {i > 0 && ', '}
-                                <span className="font-mono">{s}</span>
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                      ));
-                    })()}
-                  </div>
-                )}
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {/* Custom Domain Validation Errors */}
-          {hasCustomDomainErrors && (
-            <Alert variant="destructive">
-              <AlertTriangle className="h-4 w-4" />
-              <AlertDescription>
-                <div className="space-y-1">
-                  {customDomainErrors.map((error, idx) => (
-                    <div key={idx}>{error}</div>
-                  ))}
-                </div>
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {/* Preview Rules Section */}
+          <fieldset className="space-y-3"><legend className="mb-3 text-sm font-medium">URL Format</legend>
+            <label className="flex items-start gap-3 text-sm"><input type="radio" name="urlFormat" checked={urlFormat==='paths'} onChange={()=>setUrlFormat('paths')} className="mt-1" /><span>Paths only (Recommended)<span className="block text-xs text-muted-foreground">Sources use paths; destinations keep another origin when needed.</span></span></label>
+            <label className="flex items-start gap-3 text-sm"><input type="radio" name="urlFormat" checked={urlFormat==='full'} onChange={()=>setUrlFormat('full')} className="mt-1" /><span>Full URLs from CSV<span className="block text-xs text-muted-foreground">Keep original URLs in supported review and import formats.</span></span></label>
+            <label className="flex items-start gap-3 text-sm"><input type="radio" name="urlFormat" checked={urlFormat==='custom'} onChange={()=>setUrlFormat('custom')} className="mt-1" /><span>Custom domains</span></label>
+            {urlFormat==='custom' && <div className="grid gap-3 sm:grid-cols-2">
+              <label className="space-y-1 text-sm">Old domain<input type="url" value={customOldDomain} onChange={event=>setCustomOldDomain(event.target.value)} placeholder="https://old.example" className="block w-full rounded-md border bg-background p-2" /></label>
+              <label className="space-y-1 text-sm">New domain<input type="url" value={customNewDomain} onChange={event=>setCustomNewDomain(event.target.value)} placeholder="https://new.example" className="block w-full rounded-md border bg-background p-2" /></label>
+            </div>}
+          </fieldset>
+          <fieldset className="space-y-3"><legend className="mb-3 text-sm font-medium">Confidence levels</legend>
+            {([['high',includeHigh,setIncludeHigh],['medium',includeMedium,setIncludeMedium],['low',includeLow,setIncludeLow]] as const).map(([level,checked,setChecked]) => <div className="flex items-center gap-2" key={level}><Checkbox id={`export-${level}`} checked={checked} onCheckedChange={value=>setChecked(value===true)} /><Label htmlFor={`export-${level}`} className="capitalize">{level} ({redirects.filter(row=>row.confidenceBand===level).length})</Label></div>)}
+          </fieldset>
+          {unapproved>0 && <Alert><AlertTriangle className="h-4 w-4" /><AlertDescription>{unapproved} redirect{unapproved===1?' awaits':'s await'} review. Close export to review them; the server preview below shows which rows are excluded.</AlertDescription></Alert>}
+          {duplicateTargets>0 && <p className="text-sm text-muted-foreground">{duplicateTargets} destination{duplicateTargets===1?' is':'s are'} shared by multiple selected sources. Check that each source has an appropriate destination.</p>}
+          {preview && <div className="space-y-2 text-sm" role="status"><p>{preview.included_count} redirect{preview.included_count===1?'':'s'} included. {preview.excluded_count} excluded by export checks.</p>{!!preview.excluded.length && <details><summary className="cursor-pointer">View excluded rows</summary><ul className="mt-2 space-y-1">{preview.excluded.map((item,index)=><li key={index} className="break-all">{redirects.find(row=>row.id===item.mapping_id)?.oldUrl || item.mapping_id || 'Row'} — {item.reason.replaceAll('_',' ')}</li>)}</ul></details>}{preview.warning && <p>{preview.warning}</p>}</div>}
+          {loading && <p role="status" className="flex items-center gap-2 text-sm"><Loader2 className="h-4 w-4 animate-spin" />Preparing saved redirect preview…</p>}
+          {!options.confidenceLevels.length && <p className="text-sm">Select at least one confidence level.</p>}
           <Collapsible open={previewExpanded} onOpenChange={setPreviewExpanded}>
-            <CollapsibleTrigger className="w-full">
-              <div className="flex items-center justify-between border border-border bg-card p-3 hover:bg-accent">
-                <div className="flex items-center gap-2">
-                  {previewExpanded ? (
-                    <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                  ) : (
-                    <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                  )}
-                  <span className="text-foreground">Preview Rules</span>
-                  {filteredRedirects.length > 10 && (
-                    <span className="text-xs text-muted-foreground">(showing first 10 of {filteredRedirects.length})</span>
-                  )}
-                </div>
-                {format && selectedCount > 0 && !hasCustomDomainErrors && (
-                  <CheckCircle className="h-4 w-4 text-green-600" />
-                )}
-              </div>
-            </CollapsibleTrigger>
-            <CollapsibleContent>
-              <div className="border border-border border-t-0 p-4 bg-muted">
-                {/* URL Format Info */}
-                {format && selectedCount > 0 && (
-                  <div className="mb-3 text-xs text-muted-foreground">
-                    {urlFormat === 'paths' && (
-                      <span>URLs transformed to paths only (e.g., /page.html)</span>
-                    )}
-                    {urlFormat === 'full' && (
-                      <span>Full URLs preserved from CSV</span>
-                    )}
-                    {urlFormat === 'custom' && (
-                      <span>
-                        Custom domains applied
-                        {customOldDomain && ` - Old: ${customOldDomain}`}
-                        {customNewDomain && ` - New: ${customNewDomain}`}
-                      </span>
-                    )}
-                  </div>
-                )}
-
-                <div className="bg-card border border-border p-4 font-mono text-xs overflow-x-auto max-h-[250px] overflow-y-auto">
-                  <pre className="text-foreground whitespace-pre">
-                    {previewContent}
-                  </pre>
-                </div>
-                {format && selectedCount > 0 && !hasCustomDomainErrors && (
-                  <div className="flex items-center gap-2 mt-3 text-sm text-green-600">
-                    <CheckCircle className="h-4 w-4" />
-                    <span>Syntax validation passed</span>
-                  </div>
-                )}
-              </div>
-            </CollapsibleContent>
+            <CollapsibleTrigger className="flex w-full items-center gap-2 border border-border bg-card p-3 text-left">{previewExpanded?<ChevronDown className="h-4 w-4" />:<ChevronRight className="h-4 w-4" />}Preview Rules</CollapsibleTrigger>
+            <CollapsibleContent className="border border-t-0 p-3"><pre tabIndex={0} role="region" aria-label="Redirect rules preview" className="max-h-[250px] overflow-auto text-xs font-mono whitespace-pre focus-visible:outline-2 focus-visible:outline-ring">{preview?.content.slice(0,12000) || (format?'No preview available.':'Select a format to preview rules')}</pre>{preview && <p className="mt-3 text-xs text-muted-foreground">{preview.content.length>12000?'Preview shortened; the file contains all included rules. ':''}Generated by the server. Test rules before installing.</p>}</CollapsibleContent>
           </Collapsible>
-        </div>
-        </div>
-
-        {/* Action Buttons */}
-        <DialogFooter className="flex justify-end gap-3 pt-4 border-t border-border bg-background">
-          <Button
-            variant="outline"
-            onClick={() => onOpenChange(false)}
-          >
-            Cancel
-          </Button>
-          <Button
-            onClick={handleDownload}
-            disabled={!format || selectedCount === 0 || hasCustomDomainErrors || isDownloading}
-          >
-            {isDownloading ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Preparing download...
-              </>
-            ) : (
-              'Download File'
-            )}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
+        </fieldset>
+      </div>
+      {error && <div role="alert" className="space-y-2 text-sm text-destructive"><p>{error}</p>{validSelection && <Button variant="outline" disabled={loading||isDownloading} onClick={()=>setRefresh(value=>value+1)}>Refresh preview</Button>}</div>}
+      <DialogFooter className="gap-3 border-t pt-4"><Button variant="outline" disabled={isDownloading} onClick={()=>onOpenChange(false)}>Cancel</Button><Button disabled={!preview?.included_count||loading||isDownloading||!!error} onClick={()=>void handleDownload()}>{isDownloading?'Preparing download…':'Download File'}</Button></DialogFooter>
+    </DialogContent>
+  </Dialog>;
 }

@@ -1,4 +1,7 @@
+import { pivotEnvelopeSchema } from './pivotEnvelope.js';
 import { config } from '../config.js';
+
+export const PIVOT_REQUEST_TIMEOUT_MS = 25_000;
 
 export class RedirxApiError extends Error {
   constructor(
@@ -216,29 +219,62 @@ export class RedirxClient {
    * ownership, payment, consent, and artifact authority stay in /api/v2.
    */
   async pivot<T extends Record<string, unknown> = Record<string, unknown>>(
-    method: 'GET' | 'POST' | 'PATCH', path: string, body?: Record<string, unknown>,
+    method: 'GET' | 'POST' | 'PATCH', path: string, body?: Record<string, unknown>, signal?: AbortSignal,
   ): Promise<{ ok: true; data: PivotEnvelope & { data: T } } | { ok: false; error: RedirxApiError }> {
     const init: RequestInit = {
       method,
       headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     };
-    const response = await fetch(`${config.backendBaseUrl}/api/v2${path}`, init);
-    const payload = await response.json().catch(() => null) as unknown;
-    // v2's envelope is a recoverable business-state response even when its
-    // HTTP status is 4xx (notably payment_required/reconnect_required).
-    // Preserve it so agents receive checkout/consent/deployment next steps.
-    if (payload && typeof payload === 'object' && 'contract_version' in payload
-        && 'status' in payload && 'next_action' in payload && 'data' in payload && 'error' in payload) {
-      return { ok: true, data: payload as PivotEnvelope & { data: T } };
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    signal?.addEventListener('abort', cancel, { once: true });
+    const timer = setTimeout(cancel, PIVOT_REQUEST_TIMEOUT_MS);
+    try {
+      if (signal?.aborted) controller.abort();
+      controller.signal.throwIfAborted();
+      const response = await fetch(`${config.backendBaseUrl}/api/v2${path}`, { ...init, signal: controller.signal });
+      // The deadline covers response body consumption as well as the headers.
+      const payload: unknown = await response.json();
+      const parsed = pivotEnvelopeSchema.safeParse(payload);
+      // Recoverable business states stay intact even on 4xx. Failed envelopes
+      // are flagged by the tool layer, not flattened into a transport exception.
+      if (parsed.success) return { ok: true, data: parsed.data as PivotEnvelope & { data: T } };
+      // Older API/auth middleware may return the published error object without
+      // the v2 envelope. Retain safe recovery fields, never arbitrary body text.
+      if (!response.ok && payload && typeof payload === 'object' && !Array.isArray(payload)
+          && !('contract_version' in payload) && 'error' in payload) {
+        const error = payload.error;
+        if (error && typeof error === 'object' && !Array.isArray(error)
+            && 'code' in error && typeof error.code === 'string'
+            && 'message' in error && typeof error.message === 'string') {
+          return { ok: false, error: new RedirxApiError(response.status, error.code, error.message, {
+            retryable: 'retryable' in error && error.retryable === true,
+            next_action: 'next_action' in error && typeof error.next_action === 'string' ? error.next_action : 'none',
+          }) };
+        }
+      }
+      return {
+        ok: false,
+        error: new RedirxApiError(response.status, 'internal_error',
+          'The backend returned an invalid response. No outcome was confirmed. Read migration status if known; retry a mutation only with identical input and the same idempotency key.',
+          { retryable: false, next_action: 'retry' }),
+      };
+    } catch {
+      // Aborting our wait does NOT roll back a mutation. Never automatically
+      // dispatch again: replay is explicitly controlled by the original key.
+      const cancelled = signal?.aborted === true;
+      return {
+        ok: false,
+        error: new RedirxApiError(0, 'internal_error',
+          `${cancelled ? 'The gateway request was cancelled.' : 'The gateway could not confirm the backend response.'} ${method === 'GET'
+            ? 'Retry this read to recover the current state.'
+            : 'The mutation may have completed. Read migration status if known; retry only with identical input and the same idempotency key.'}`,
+          { retryable: !cancelled, next_action: 'retry' }),
+      };
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', cancel);
     }
-    const errorBody = payload && typeof payload === 'object' && 'error' in payload
-      ? (payload as { error?: Record<string, unknown> }).error ?? {}
-      : {};
-    return {
-      ok: false,
-      error: new RedirxApiError(response.status, String(errorBody.code ?? 'unknown_error'),
-        String(errorBody.message ?? `Request failed with status ${response.status}`), errorBody),
-    };
   }
 }

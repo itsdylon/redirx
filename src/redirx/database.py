@@ -156,7 +156,9 @@ class MigrationSessionDB:
 
     def update_session_progress(self, session_id: UUID, current_stage: int, stage_name: str, total_stages: int) -> None:
         """
-        Update the progress fields of a migration session.
+        Update progress for an explicitly non-worker caller (not attempt-fenced).
+
+        Queue workers must use update_session_progress_for_attempt instead.
 
         Args:
             session_id: The session ID to update.
@@ -169,6 +171,35 @@ class MigrationSessionDB:
             'stage_name': stage_name,
             'total_stages': total_stages,
         }).eq('id', str(session_id)).execute()
+
+    def update_session_progress_for_attempt(self, session_id: UUID, current_stage: int,
+                                            stage_name: str, total_stages: int, *,
+                                            worker_id: str, attempt_count: int) -> bool:
+        """Write progress only for the current live processing attempt.
+
+        This is one conditional UPDATE, not a read-then-write ownership check.
+        Like the historical heartbeat, expiry uses a client-clock snapshot.
+        Missing/unknown acknowledgements are not success and are never retried.
+        Rejection does not cancel already running pipeline/provider work.
+        """
+        if not isinstance(worker_id, str) or not worker_id.strip() or type(attempt_count) is not int or attempt_count < 1:
+            return False
+        expected = {'current_stage': current_stage, 'stage_name': stage_name, 'total_stages': total_stages}
+        result = self.client.table('migration_sessions').update(expected).eq(
+            'id', str(session_id)
+        ).eq('locked_by', worker_id).eq('attempt_count', attempt_count).eq(
+            'status', 'processing'
+        ).gt('lease_expires_at', datetime.now(timezone.utc).isoformat()).execute()
+        if getattr(result, 'error', None):
+            return False
+        rows = getattr(result, 'data', None)
+        if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+            return False
+        row = rows[0]
+        return (str(row.get('id')) == str(session_id)
+                and type(row.get('attempt_count')) is int and row['attempt_count'] == attempt_count
+                and row.get('locked_by') == worker_id and row.get('status') == 'processing'
+                and all(row.get(key) == value for key, value in expected.items()))
 
     def get_session(self, session_id: UUID) -> Dict[str, Any]:
         """

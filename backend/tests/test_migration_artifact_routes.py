@@ -55,3 +55,52 @@ class ArtifactRouteTests(unittest.TestCase):
         with patch.dict(os.environ, {'MCP_PIVOT_ENABLED': 'false'}):
             self.assertEqual(self.client.get(self.path+'/'+B, headers=self.headers).status_code, 503)
         self.service.authorize_download.assert_not_called()
+
+    def test_selection_conflict_is_409_with_readback_not_retryable_503(self):
+        from backend.services.migration_artifact_service import DeploymentConflictError
+        self.service.create_artifact.side_effect = DeploymentConflictError('Selection changed. Read current migration state.')
+        response = self.client.post(self.path, json={'run_id': B, 'format': 'csv', 'revision': 0,
+            'idempotency_key': 'same'}, headers=self.headers)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json['error']['code'], 'revision_conflict')
+        self.assertFalse(response.json['error']['retryable'])
+        self.assertEqual(response.json['next_action'], 'poll')
+        self.service.create_artifact.assert_called_once()
+
+    def test_preflight_stale_revision_is_409_with_readback(self):
+        from backend.services.migration_artifact_readers import SelectionRevisionConflictError
+        self.service.create_artifact.side_effect = SelectionRevisionConflictError('Selection changed. Read current migration state.')
+        response = self.client.post(self.path, json={'run_id': B, 'format': 'csv', 'revision': 0,
+            'idempotency_key': 'same'}, headers=self.headers)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json['error']['code'], 'revision_conflict')
+        self.assertFalse(response.json['error']['retryable'])
+        self.assertEqual(response.json['next_action'], 'poll')
+        self.service.create_artifact.assert_called_once()
+
+    def test_unknown_publication_outcome_is_503_with_same_key_readback_guidance(self):
+        from backend.services.migration_artifact_service import ArtifactOperationUnconfirmedError
+        self.service.create_artifact.side_effect = ArtifactOperationUnconfirmedError()
+        response = self.client.post(self.path, json={'run_id': B, 'format': 'csv', 'revision': 0,
+            'idempotency_key': 'same'}, headers=self.headers)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json['error']['code'], 'internal_error')
+        self.assertTrue(response.json['error']['retryable'])
+        self.assertEqual(response.json['next_action'], 'poll')
+        self.assertIn('same idempotency key', response.json['error']['message'])
+        self.service.create_artifact.assert_called_once()
+
+    def test_review_eligibility_and_incomplete_inventory_have_distinct_recovery(self):
+        from backend.services.migration_artifact_service import PartialArtifactError
+        from backend.services.migration_quote_service import InventoryIncompleteError
+        for error, action in ((PartialArtifactError('Review current matches.'), 'resolve_matches'),
+                              (InventoryIncompleteError('Complete the supplied inventories.'), 'provide_inventory')):
+            with self.subTest(error=type(error).__name__):
+                self.service.create_artifact.side_effect = error
+                response = self.client.post(self.path, json={'run_id': B, 'format': 'csv', 'revision': 0,
+                    'idempotency_key': 'unchanged'}, headers=self.headers)
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json['error']['code'], 'inventory_incomplete')
+                self.assertEqual(response.json['next_action'], action)
+                self.assertEqual(response.json['error']['next_action'], action)
+                self.assertFalse(response.json['error']['retryable'])

@@ -48,7 +48,7 @@ before(async()=>{
  await exec(await read('./legacy-fixture.sql'));
  await exec(await read('./current-billing-fixture.sql'));
  const names=await readdir(new URL('../migrations/',import.meta.url));
- for(const prefix of ['006','009','019','024','026','027','031','032','034','035','036','037','038','039','040','041','042','043','044','045','046','047','048','049','050','051','053','054','055','056','057','058','062','063','064']){
+ for(const prefix of ['006','009','019','024','026','027','031','032','034','035','036','037','038','039','040','041','042','043','044','045','046','047','048','049','050','051','053','054','055','056','057','058','062','063','064','065','066','067','068','069']){
   const file=names.find(n=>n.startsWith(prefix+'_')&&n.endsWith('.sql'));
   try {await exec(await read('../migrations/'+file));}catch(e){e.message=file+': '+e.message;throw e;}
  }

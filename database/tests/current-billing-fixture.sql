@@ -3,6 +3,8 @@ ALTER TABLE migration_sessions ADD COLUMN locked_at timestamptz,
  ADD COLUMN locked_by text, ADD COLUMN lease_expires_at timestamptz,
  ADD COLUMN attempt_count integer DEFAULT 0, ADD COLUMN last_error text,
  ADD COLUMN current_stage integer, ADD COLUMN stage_name text, ADD COLUMN total_stages integer,
+ ADD COLUMN total_mappings integer DEFAULT 0, ADD COLUMN approved_mappings integer DEFAULT 0,
+ ADD COLUMN is_tutorial boolean NOT NULL DEFAULT false,
  ADD COLUMN is_preview boolean NOT NULL DEFAULT false;
 CREATE TABLE url_mappings (
  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),session_id uuid NOT NULL REFERENCES migration_sessions(id) ON DELETE CASCADE,

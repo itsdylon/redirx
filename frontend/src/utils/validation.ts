@@ -242,7 +242,8 @@ const ACCEPTED_EXTENSIONS = ['.csv', '.txt', '.xml', '.xlsx'];
  * Validates a file (CSV, TXT, XML sitemap, or XLSX) for size, structure, and content.
  * XML and XLSX files are parsed and converted to a .txt file for the backend.
  */
-export async function validateFile(file: File): Promise<FileValidationResult> {
+export async function validateFile(file: File, signal?: AbortSignal): Promise<FileValidationResult> {
+  signal?.throwIfAborted();
   const result: FileValidationResult = {
     valid: true,
     warnings: [],
@@ -280,23 +281,24 @@ export async function validateFile(file: File): Promise<FileValidationResult> {
 
   // Branch by format
   if (ext === '.xml') {
-    return validateXmlFile(file, result);
+    return validateXmlFile(file, result, signal);
   }
 
   if (ext === '.xlsx') {
-    return validateXlsxFile(file, result);
+    return validateXlsxFile(file, result, signal);
   }
 
   // .csv / .txt — existing text-based validation
-  return validateTextFile(file, result);
+  return validateTextFile(file, result, signal);
 }
 
 /** Backwards-compatible alias */
 export const validateCSV = validateFile;
 
-async function validateXmlFile(file: File, result: FileValidationResult): Promise<FileValidationResult> {
+async function validateXmlFile(file: File, result: FileValidationResult, signal?: AbortSignal): Promise<FileValidationResult> {
   try {
-    const text = await readFileAsText(file);
+    const text = await readFileAsText(file, signal);
+    signal?.throwIfAborted();
     const parsed = parseXmlSitemap(text);
 
     if (parsed.errors.length > 0) {
@@ -317,15 +319,16 @@ async function validateXmlFile(file: File, result: FileValidationResult): Promis
 
     result.convertedFile = urlsToTxtFile(parsed.urls, file.name);
   } catch (error) {
+    signal?.throwIfAborted();
     result.valid = false;
     result.errors.push(error instanceof Error ? `Failed to parse XML: ${error.message}` : 'Failed to parse XML file');
   }
   return result;
 }
 
-async function validateXlsxFile(file: File, result: FileValidationResult): Promise<FileValidationResult> {
+async function validateXlsxFile(file: File, result: FileValidationResult, signal?: AbortSignal): Promise<FileValidationResult> {
   try {
-    const parsed = await parseXlsx(file);
+    const parsed = await parseXlsx(file, signal);
 
     if (parsed.errors.length > 0) {
       result.valid = false;
@@ -345,15 +348,17 @@ async function validateXlsxFile(file: File, result: FileValidationResult): Promi
 
     result.convertedFile = urlsToTxtFile(parsed.urls, file.name);
   } catch (error) {
+    signal?.throwIfAborted();
     result.valid = false;
     result.errors.push(error instanceof Error ? `Failed to parse Excel file: ${error.message}` : 'Failed to parse Excel file');
   }
   return result;
 }
 
-async function validateTextFile(file: File, result: FileValidationResult): Promise<FileValidationResult> {
+async function validateTextFile(file: File, result: FileValidationResult, signal?: AbortSignal): Promise<FileValidationResult> {
   try {
-    const text = await readFileAsText(file);
+    const text = await readFileAsText(file, signal);
+    signal?.throwIfAborted();
 
     if (text.trim().length === 0) {
       result.valid = false;
@@ -423,6 +428,7 @@ async function validateTextFile(file: File, result: FileValidationResult): Promi
     }
 
   } catch (error) {
+    signal?.throwIfAborted();
     result.valid = false;
     if (error instanceof Error) {
       result.errors.push(`Failed to read file: ${error.message}`);
@@ -436,9 +442,14 @@ async function validateTextFile(file: File, result: FileValidationResult): Promi
 /**
  * Reads a file as text using FileReader
  */
-function readFileAsText(file: File): Promise<string> {
+function readFileAsText(file: File, signal?: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
+    signal?.throwIfAborted();
     const reader = new FileReader();
+    const abort = () => { reader.abort(); reject(signal?.reason ?? new DOMException('File reading cancelled', 'AbortError')); };
+    const cleanup = () => signal?.removeEventListener('abort', abort);
+    signal?.addEventListener('abort', abort, { once: true });
+    reader.onloadend = cleanup;
 
     reader.onload = (e) => {
       const result = e.target?.result;
@@ -453,7 +464,7 @@ function readFileAsText(file: File): Promise<string> {
       reject(new Error('File reading failed'));
     };
 
-    reader.readAsText(file, 'UTF-8');
+    try { reader.readAsText(file, 'UTF-8'); } catch (error) { cleanup(); reject(error); }
   });
 }
 

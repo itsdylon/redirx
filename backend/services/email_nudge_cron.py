@@ -32,6 +32,10 @@ def run_nudges() -> int:
 
     Returns the total number of nudges sent.
     """
+    # Retired upload-funnel nudges stay disabled before any database work.
+    if os.getenv("MCP_PIVOT_ENABLED", "false").lower() == "true":
+        return 0
+
     from redirx.database import SupabaseClient
     from backend.services.email_service import EmailService, EmailType
 
@@ -74,17 +78,16 @@ def run_nudges() -> int:
                     continue
 
             # Check if this specific nudge was already sent
-            log_template = f"nudge_day{day}"
             existing = client.table("email_log").select("id").eq(
                 "user_id", user_id
-            ).eq("email_type", EmailType.ONBOARD_NUDGE).like(
+            ).eq("email_type", EmailType.ONBOARD_NUDGE).eq("status", "sent").like(
                 "subject", f"%day {day}%"
             ).limit(1).execute()
 
             # Also check by template matching in a more reliable way
             existing2 = client.table("email_log").select("id").eq(
                 "user_id", user_id
-            ).eq("email_type", EmailType.ONBOARD_NUDGE).like(
+            ).eq("email_type", EmailType.ONBOARD_NUDGE).eq("status", "sent").like(
                 "subject", f"%{_nudge_subjects[day]}%"
             ).limit(1).execute()
 

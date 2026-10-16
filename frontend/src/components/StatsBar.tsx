@@ -57,7 +57,7 @@ export function StatsBar({ stats }: StatsBarProps) {
         <span className="text-sm text-muted-foreground whitespace-nowrap">
           {stats.approved}/{stats.total} approved
         </span>
-        <Progress value={stats.approvalProgress} className="h-2 flex-1" />
+        <Progress aria-label="Redirect approval progress" aria-valuetext={`${stats.approved} of ${stats.total} approved`} value={stats.approvalProgress} className="h-2 flex-1" />
         <span className="text-sm text-foreground font-medium whitespace-nowrap">
           {stats.approvalProgress}%
         </span>

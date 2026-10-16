@@ -38,6 +38,7 @@ export function LoadingScreen({
   const [failureCount, setFailureCount] = useState(0);
   const [nextRetryIn, setNextRetryIn] = useState(0);
   const [pollingError, setPollingError] = useState(false);
+  const [retryAttempt, setRetryAttempt] = useState(0);
   const [isDelayingCompletion, setIsDelayingCompletion] = useState(false);
   const startedAtRef = useRef<number>(Date.now());
 
@@ -55,20 +56,36 @@ export function LoadingScreen({
   useEffect(() => {
     if (!sessionId) return;
 
+    let active = true;
+    // Keep retry accounting inside this request lifetime. UI state updates
+    // must not restart the effect and cancel its scheduled backoff.
+    let failures = 0;
+    setFailureCount(0);
+    setNextRetryIn(0);
+    setPollingError(false);
+    setError(null);
+    setProgress({ currentStage: null, stageName: null, totalStages: null });
     let timeoutId: NodeJS.Timeout;
     let countdownIntervalId: NodeJS.Timeout | null = null;
 
     const poll = async () => {
+      if (!active) return;
       // Stop polling if we've hit the error threshold
-      if (failureCount >= ERROR_THRESHOLD) {
+      if (failures >= ERROR_THRESHOLD) {
         setPollingError(true);
         return;
       }
 
       try {
         const status: SessionStatus = await getSessionStatus(sessionId);
+        if (!active) return;
 
-        // Successful poll - reset failure count
+        // Successful poll - reset failure count and stop the retry countdown.
+        failures = 0;
+        if (countdownIntervalId) {
+          clearInterval(countdownIntervalId);
+          countdownIntervalId = null;
+        }
         setFailureCount(0);
         setNextRetryIn(0);
 
@@ -106,14 +123,22 @@ export function LoadingScreen({
         // Schedule next poll with normal interval
         timeoutId = setTimeout(poll, POLL_INTERVAL);
       } catch (error) {
+        if (!active) return;
         console.error('Error polling status:', error);
 
         // Increment failure count
-        const newFailureCount = failureCount + 1;
-        setFailureCount(newFailureCount);
+        failures += 1;
+        setFailureCount(failures);
+        if (failures >= ERROR_THRESHOLD) {
+          if (countdownIntervalId) clearInterval(countdownIntervalId);
+          countdownIntervalId = null;
+          setNextRetryIn(0);
+          setPollingError(true);
+          return;
+        }
 
         // Calculate backoff delay
-        const delay = getBackoffDelay(newFailureCount);
+        const delay = getBackoffDelay(failures);
         setNextRetryIn(Math.ceil(delay / 1000)); // Convert to seconds
 
         // Start countdown timer
@@ -133,21 +158,20 @@ export function LoadingScreen({
     poll();
 
     return () => {
+      active = false;
       clearTimeout(timeoutId);
       if (countdownIntervalId) {
         clearInterval(countdownIntervalId);
       }
     };
-  }, [failureCount, minDisplayMs, navigate, sessionId, tutorialMode]);
+  }, [retryAttempt, minDisplayMs, navigate, sessionId, tutorialMode, user?.id]);
 
   const handleContinueInBackground = () => {
     navigate(fallbackRoute);
   };
 
   const handleRetry = () => {
-    setFailureCount(0);
-    setNextRetryIn(0);
-    setPollingError(false);
+    setRetryAttempt(attempt => attempt + 1);
   };
 
   const hasProgress = progress.currentStage != null && progress.totalStages != null;

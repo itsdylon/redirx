@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { usePostHog } from '@posthog/react';
 import { BarChart3, CheckCircle2, Globe, Loader2 } from 'lucide-react';
@@ -12,7 +12,8 @@ import {
   getGscStatus,
   propertyCovers,
 } from '../api/gsc';
-import { queryKeys } from '../queries/queryKeys';
+import { monitoringKeys } from '../queries/monitoringKeys';
+import { useAuth } from '../contexts/AuthContext';
 
 const METHOD_LABELS: Record<string, string> = {
   gsc: 'Search Console',
@@ -45,7 +46,13 @@ interface DomainDiscoveryPanelProps {
  * discovers the site's pages (sitemap -> CMS API -> crawl) and reports the
  * result upward as if a URL file had been uploaded.
  */
-export function DomainDiscoveryPanel({ side, label, hint, emphasis = false, onDiscovered }: DomainDiscoveryPanelProps) {
+export function DomainDiscoveryPanel(props: DomainDiscoveryPanelProps) {
+  const { user } = useAuth();
+  if (!user) return null;
+  return <DomainDiscoveryContent key={`${user.id}:${props.side}`} {...props} owner={user.id} />;
+}
+
+function DomainDiscoveryContent({ side, label, hint, emphasis = false, onDiscovered, owner }: DomainDiscoveryPanelProps & { owner: string }) {
   const posthog = usePostHog();
   const [domain, setDomain] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -57,14 +64,25 @@ export function DomainDiscoveryPanel({ side, label, hint, emphasis = false, onDi
   const [chosenProperty, setChosenProperty] = useState<string | null | undefined>(undefined);
   const [pickingProperty, setPickingProperty] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const pending = useRef<AbortController | null>(null);
+  const revision = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      revision.current += 1;
+      pending.current?.abort();
+    };
+  }, []);
 
   // Only the old side has traffic to lose, so it is the only side where
   // Search Console changes the answer.
   const isTrafficSide = side === 'old';
 
   const statusQuery = useQuery({
-    queryKey: queryKeys.gsc.status,
-    queryFn: getGscStatus,
+    queryKey: monitoringKeys.gscStatus(owner),
+    queryFn: ({ signal }) => getGscStatus(signal),
     enabled: isTrafficSide,
   });
   const connected = !!statusQuery.data?.connected;
@@ -73,8 +91,8 @@ export function DomainDiscoveryPanel({ side, label, hint, emphasis = false, onDi
   const gscAvailable = statusQuery.data?.configured !== false;
 
   const propertiesQuery = useQuery({
-    queryKey: queryKeys.gsc.properties,
-    queryFn: getGscProperties,
+    queryKey: monitoringKeys.gscProperties(owner),
+    queryFn: ({ signal }) => getGscProperties(signal),
     enabled: isTrafficSide && connected,
     staleTime: 5 * 60 * 1000,
   });
@@ -106,8 +124,10 @@ export function DomainDiscoveryPanel({ side, label, hint, emphasis = false, onDi
       // BrowserRouter with no basename, so this is the router's path too —
       // and it keeps this panel usable outside a Router.
       const url = await getGscConnectUrl(window.location.pathname);
+      if (!mounted.current) return;
       window.location.href = url;
     } catch (err) {
+      if (!mounted.current) return;
       setError(err instanceof Error ? err.message : 'Could not start Search Console sign-in.');
       setConnecting(false);
     }
@@ -115,7 +135,10 @@ export function DomainDiscoveryPanel({ side, label, hint, emphasis = false, onDi
 
   const handleDiscover = async () => {
     const trimmed = domain.trim();
-    if (!trimmed || isLoading) return;
+    if (!trimmed || pending.current) return;
+    const requestRevision = ++revision.current;
+    const controller = new AbortController();
+    pending.current = controller;
 
     setIsLoading(true);
     setError(null);
@@ -127,7 +150,9 @@ export function DomainDiscoveryPanel({ side, label, hint, emphasis = false, onDi
     });
 
     try {
-      const response = await discoverSite(trimmed, side, effectiveProperty ?? undefined);
+      const response = await discoverSite(trimmed, side,
+        chosenProperty === null ? null : effectiveProperty ?? undefined, controller.signal);
+      if (requestRevision !== revision.current) return;
       setResult(response);
       onDiscovered(side, response);
       posthog?.capture('domain_discovery_completed', {
@@ -140,17 +165,25 @@ export function DomainDiscoveryPanel({ side, label, hint, emphasis = false, onDi
         duration_ms: response.duration_ms,
       });
     } catch (err) {
+      if (requestRevision !== revision.current || controller.signal.aborted) return;
       const message = err instanceof Error ? err.message : 'Could not scan this domain.';
       setError(message);
       setResult(null);
       onDiscovered(side, null);
       posthog?.capture('domain_discovery_failed', { side, domain: trimmed, error: message });
     } finally {
-      setIsLoading(false);
+      if (requestRevision === revision.current) {
+        pending.current = null;
+        setIsLoading(false);
+      }
     }
   };
 
   const handleClear = () => {
+    revision.current += 1;
+    pending.current?.abort();
+    pending.current = null;
+    setIsLoading(false);
     setResult(null);
     setError(null);
     onDiscovered(side, null);
@@ -213,12 +246,13 @@ export function DomainDiscoveryPanel({ side, label, hint, emphasis = false, onDi
         <p className="text-sm font-medium text-foreground">{label}</p>
       </div>
       {hint && <p className="text-xs text-muted-foreground mb-3">{hint}</p>}
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <Input
           type="text"
           placeholder={side === 'old' ? 'old-site.com' : 'new-site.com'}
           value={domain}
-          onChange={(e) => setDomain(e.target.value)}
+          onChange={(e) => { setDomain(e.target.value); setChosenProperty(undefined); }}
+          className="min-w-0 flex-1 basis-40 text-base"
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               e.preventDefault();
@@ -238,14 +272,14 @@ export function DomainDiscoveryPanel({ side, label, hint, emphasis = false, onDi
             'Find Pages'
           )}
         </Button>
+        {isLoading && <Button type="button" variant="outline" onClick={handleClear}>Cancel scan</Button>}
       </div>
       {isLoading && (
-        <p className="text-xs text-muted-foreground mt-2">
-          Reading your sitemap — usually a few seconds. We don&rsquo;t crawl your site
-          page by page.
+        <p role="status" className="text-sm text-muted-foreground mt-2">
+          Checking sitemaps and other available page sources. Large sites may take longer.
         </p>
       )}
-      {error && <p className="text-sm text-destructive mt-2">{error}</p>}
+      {error && <p role="alert" className="text-sm text-destructive mt-2">{error}</p>}
 
       {isTrafficSide && gscAvailable && !connected && !statusQuery.isLoading && (
         <div className="mt-3 pt-3 border-t border-border/60">
@@ -288,7 +322,7 @@ export function DomainDiscoveryPanel({ side, label, hint, emphasis = false, onDi
                   <span className="text-foreground">{formatProperty(effectiveProperty)}</span>
                 </span>
               </p>
-              {properties.length > 1 && (
+              {properties.length > 0 && (
                 <button
                   type="button"
                   className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground flex-shrink-0"
@@ -300,14 +334,14 @@ export function DomainDiscoveryPanel({ side, label, hint, emphasis = false, onDi
             </div>
           ) : (
             <p className="text-xs text-muted-foreground">
-              No Search Console property covers this domain
-              {properties.length > 0 && ' — pick one below if it should'}.
+              {chosenProperty === null ? 'Search Console is off for this scan.' : <>No Search Console property covers this domain
+              {properties.length > 0 && ' — pick one below if it should'}.</>}
             </p>
           )}
 
           {(pickingProperty || (!!domain.trim() && !effectiveProperty && properties.length > 0)) && (
             <select
-              className="mt-2 w-full text-xs bg-background border border-border rounded px-2 py-1.5 text-foreground"
+              className="mt-2 w-full text-base sm:text-xs bg-background border border-border rounded px-2 py-1.5 text-foreground"
               value={effectiveProperty ?? ''}
               onChange={(e) => {
                 const value = e.target.value || null;
@@ -315,6 +349,7 @@ export function DomainDiscoveryPanel({ side, label, hint, emphasis = false, onDi
                 posthog?.capture('gsc_property_overridden', { property: value ?? undefined });
               }}
               aria-label="Search Console property"
+              disabled={isLoading}
             >
               <option value="">Don&rsquo;t use Search Console</option>
               {properties.map((p) => (

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import * as XLSX from 'xlsx';
 import {
   validateUrl,
@@ -614,5 +614,26 @@ describe('calculatePasswordStrength', () => {
     expect(r.feedback.some((f) => f.includes('uppercase'))).toBe(true);
     expect(r.feedback.some((f) => f.includes('number'))).toBe(true);
     expect(r.feedback.some((f) => f.includes('special'))).toBe(true);
+  });
+});
+
+describe('file-read cancellation', () => {
+  it.each(['csv', 'xml'])('aborts a pending %s FileReader and rejects instead of returning a validation result', async ext => {
+    const controller = new AbortController();
+    const abort = vi.spyOn(FileReader.prototype, 'abort');
+    try {
+      const pending = validateFile(new File(['/url'], `cancel.${ext}`), controller.signal);
+      controller.abort();
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+      expect(abort).toHaveBeenCalledOnce();
+    } finally { abort.mockRestore(); }
+  });
+  it('rejects an already cancelled check without starting a file read', async () => {
+    const controller = new AbortController(); controller.abort();
+    const read = vi.spyOn(FileReader.prototype, 'readAsText');
+    try {
+      await expect(validateFile(new File(['/url'], 'cancel.csv'), controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+      expect(read).not.toHaveBeenCalled();
+    } finally { read.mockRestore(); }
   });
 });

@@ -4,7 +4,7 @@ from werkzeug.exceptions import BadRequest, UnsupportedMediaType
 
 from backend.extensions import limiter
 from backend.routes.v2_routes import authenticated, account_limit_key, body, failure, repository_error
-from backend.services.migration_repository import MigrationRepositoryError
+from backend.services.migration_repository import MigrationRepositoryError, RepositoryUnavailableError
 from backend.services.migration_gsc_service import MigrationGSCService
 
 
@@ -19,6 +19,13 @@ def agent_callback_response(service_factory=None):
         message = ('Search Console connected. Return to your agent and select a property to sync traffic.' if success else
                    'Search Console was not connected. Return to your agent to reconnect, or continue without traffic data.')
         response = make_response(message, 200 if success else 400)
+    except RepositoryUnavailableError:
+        # Consumption/publication may have committed before its reply was lost.
+        # Never repeat the one-use exchange or tell the user it was rolled back.
+        response = make_response(
+            'The Search Console connection result could not be confirmed. Return to your agent and check '
+            'Search Console status before starting new consent. A saved connection may be from an earlier attempt. '
+            'Do not reload this callback to retry.', 503)
     except (MigrationRepositoryError, ValueError):
         response = make_response('This Search Console link is invalid or expired. Return to your agent and reconnect.', 400)
     response.headers.update({'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store',

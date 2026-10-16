@@ -128,84 +128,14 @@ def get_dashboard_stats():
     Get dashboard overview with aggregate stats for authenticated user.
     Tutorial sessions are excluded from totals and recent session lists.
     """
-    session_db = MigrationSessionDB()
-
     try:
-        # Get non-tutorial sessions for user
-        sessions_result = session_db.client.table("migration_sessions").select("*").eq(
-            "user_id", str(request.user.id)
-        ).eq(
-            "is_tutorial", False
-        ).eq(
-            "is_preview", False
-        ).order(
-            "created_at", desc=True
-        ).execute()
-
-        sessions = sessions_result.data
-
-        # Calculate aggregate stats
-        total_sessions = len(sessions)
-        total_redirects = sum(s.get("total_mappings", 0) for s in sessions)
-        total_approved = sum(s.get("approved_mappings", 0) for s in sessions)
-
-        # Calculate approval progress
-        approval_progress = (total_approved / total_redirects * 100) if total_redirects > 0 else 0
-
-        # Query url_mappings for confidence breakdown and average
-        session_ids = [s["id"] for s in sessions]
-        confidence_high = 0
-        confidence_medium = 0
-        confidence_low = 0
-        confidence_sum = 0.0
-        confidence_count = 0
-        exact_count = 0
-
-        if session_ids:
-            mappings_result = session_db.client.table("url_mappings").select(
-                "confidence_score, match_type"
-            ).in_("session_id", session_ids).execute()
-
-            for mapping in mappings_result.data:
-                score = mapping.get("confidence_score", 0.0)
-                match_type = mapping.get("match_type", "")
-
-                if match_type == "exact_url":
-                    exact_count += 1
-                    continue
-
-                confidence_sum += score
-                confidence_count += 1
-
-                if score >= 0.85:
-                    confidence_high += 1
-                elif score >= 0.65:
-                    confidence_medium += 1
-                else:
-                    confidence_low += 1
-
-        average_confidence = round((confidence_sum / confidence_count) * 100, 1) if confidence_count > 0 else 0
-
-        return jsonify({
-            "success": True,
-            "total_redirects": total_redirects,
-            "total_sessions": total_sessions,
-            "approval_progress": round(approval_progress, 1),
-            "average_confidence": average_confidence,
-            "confidence_breakdown": {
-                "high": confidence_high,
-                "medium": confidence_medium,
-                "low": confidence_low,
-                "exact": exact_count,
-            },
-            "recent_sessions": sessions[:5],
-        }), 200
-
-    except Exception as exc:
-        return jsonify({
-            "success": False,
-            "error": str(exc),
-        }), 500
+        from backend.services.legacy_dashboard_service import read_dashboard
+        return jsonify(read_dashboard(SupabaseClient.get_admin_client(), str(request.user.id))), 200
+    except Exception:
+        # Missing migration, unavailable transport and malformed acknowledgments
+        # must not become a successful dashboard containing fabricated zeros.
+        current_app.logger.warning("Historical dashboard snapshot unavailable")
+        return jsonify({"success": False, "error": "Dashboard data is unavailable. Try loading it again."}), 503
 
 
 @user_blueprint.route("/sessions", methods=["GET"])
@@ -213,31 +143,28 @@ def get_dashboard_stats():
 @require_auth
 def get_user_sessions():
     """
-    Get all non-tutorial migration sessions for authenticated user.
+    Read owned historical sessions: legacy full list or explicit cursor/search mode.
     """
-    session_db = MigrationSessionDB()
-
+    from backend.services.legacy_session_history import read_all_sessions, read_session_page, InvalidHistoryPage
     try:
-        result = session_db.client.table("migration_sessions").select("*").eq(
-            "user_id", str(request.user.id)
-        ).eq(
-            "is_tutorial", False
-        ).eq(
-            "is_preview", False
-        ).order(
-            "created_at", desc=True
-        ).execute()
-
-        return jsonify({
-            "success": True,
-            "sessions": result.data,
-        }), 200
-
-    except Exception as exc:
-        return jsonify({
-            "success": False,
-            "error": str(exc),
-        }), 500
+        mode=request.args.get('pagination')
+        if mode is None:
+            if any(key in request.args for key in ('cursor','limit','q')):
+                raise InvalidHistoryPage('Use pagination=cursor for history search and pages.')
+            return jsonify(read_all_sessions(SupabaseClient.get_admin_client(),str(request.user.id))),200
+        if mode!='cursor':
+            raise InvalidHistoryPage('Unknown history pagination mode.')
+        try:
+            limit=int(request.args.get('limit','50'))
+        except ValueError:
+            raise InvalidHistoryPage('History page size must be from 1 to 100.') from None
+        return jsonify(read_session_page(SupabaseClient.get_admin_client(),str(request.user.id),
+            search=request.args.get('q',''),cursor=request.args.get('cursor'),limit=limit)),200
+    except InvalidHistoryPage as exc:
+        return jsonify({'success':False,'error':str(exc)}),400
+    except Exception:
+        current_app.logger.warning('Historical session list unavailable')
+        return jsonify({'success':False,'error':'Project history is unavailable. Reload to try again.'}),503
 
 
 @user_blueprint.route("/sessions/<session_id>", methods=["PUT"])
@@ -295,69 +222,34 @@ def update_session(session_id):
 @limiter.limit("30 per minute")
 @require_auth
 def delete_session(session_id):
-    """
-    Delete a migration session and all associated data.
-    """
-    # Use a fresh service-role client so delete calls are not affected by
-    # per-request auth state on the shared singleton client.
-    session_db = MigrationSessionDB(client=SupabaseClient.get_admin_client())
-
-    step = "load-session"
-
+    """Atomically delete an owned historical session and its preview descendants."""
+    from uuid import UUID
     try:
-        existing = session_db.client.table("migration_sessions").select("*").eq(
-            "id", session_id
-        ).execute()
-
-        if not existing.data:
-            return jsonify({
-                "success": False,
-                "error": "Session not found",
-            }), 404
-
-        if existing.data[0]["user_id"] != str(request.user.id):
-            return jsonify({
-                "success": False,
-                "error": "Unauthorized: Session belongs to another user",
-            }), 403
-
-        # Include any preview child sessions so dependent rows are removed before
-        # deleting migration_sessions (some environments do not use FK cascade).
-        step = "collect-related-sessions"
-        related_result = session_db.client.table("migration_sessions").select("id").eq(
-            "source_session_id", session_id
-        ).eq(
-            "user_id", str(request.user.id)
-        ).execute()
-        related_session_ids = [session_id] + [row["id"] for row in related_result.data or []]
-        related_session_ids = list(dict.fromkeys(related_session_ids))
-
-        step = "delete-url-mappings"
-        session_db.client.table("url_mappings").delete().in_("session_id", related_session_ids).execute()
-
-        step = "delete-webpage-embeddings"
-        session_db.client.table("webpage_embeddings").delete().in_("session_id", related_session_ids).execute()
-
-        step = "delete-migration-sessions"
-        session_db.client.table("migration_sessions").delete().in_("id", related_session_ids).execute()
-
-        return jsonify({
-            "success": True,
-            "message": "Session deleted successfully",
-        }), 200
-
+        session_id = str(UUID(session_id))
+        owner = str(UUID(str(request.user.id)))
+    except (ValueError, TypeError, AttributeError):
+        return jsonify({"success": False, "error": "Invalid session identifier."}), 400
+    try:
+        # One database transaction. Never fall back to independent DELETE calls:
+        # an unavailable RPC must not partially erase a project's evidence.
+        result = SupabaseClient.get_admin_client().rpc('delete_owned_legacy_session', {
+            'p_user_id': owner, 'p_session_id': session_id,
+        }).execute()
+        if getattr(result, 'error', None):
+            raise RuntimeError('Session deletion storage unavailable')
+        data = getattr(result, 'data', None)
+        if (not isinstance(data, dict) or data.get('session_id') != session_id
+                or type(data.get('deleted_count')) is not int or data['deleted_count'] < 1):
+            raise RuntimeError('Invalid session deletion result')
+        return jsonify({"success": True, "message": "Session deleted successfully"}), 200
     except Exception as exc:
-        current_app.logger.exception(
-            "Failed to delete session=%s user=%s step=%s",
-            session_id,
-            getattr(request.user, "id", None),
-            step,
-        )
-        return jsonify({
-            "success": False,
-            "error": str(exc),
-            "step": step,
-        }), 500
+        code = getattr(exc, 'message', '')
+        if getattr(exc, 'code', '') == 'P0001' and code == 'not_found':
+            return jsonify({"success": False, "error": "Session not found"}), 404
+        if getattr(exc, 'code', '') == 'P0001' and code == 'operation_conflict':
+            return jsonify({"success": False, "error": "This project cannot be deleted from historical session controls."}), 409
+        current_app.logger.exception('Atomic session deletion failed for session=%s', session_id)
+        return jsonify({"success": False, "error": "Deletion could not be confirmed. Refresh project history before retrying."}), 503
 
 
 @user_blueprint.route("/sessions/<session_id>/status", methods=["GET"])

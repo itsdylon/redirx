@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
@@ -71,6 +71,9 @@ export function DemoPage() {
   const [tablePage, setTablePage] = useState(0);
   const controllerRef = useRef<AbortController | null>(null);
 
+  const requestId = useRef(0);
+  useEffect(() => () => { requestId.current++; controllerRef.current?.abort(); }, []);
+
   const handleSubmit = useCallback(
     (e: React.FormEvent) => {
       e.preventDefault();
@@ -80,6 +83,8 @@ export function DemoPage() {
       // Prepend https:// if missing
       const finalUrl = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 
+      controllerRef.current?.abort();
+      const current = ++requestId.current;
       // Reset state
       setPages([]);
       setResult(null);
@@ -90,13 +95,15 @@ export function DemoPage() {
       setState('running');
 
       controllerRef.current = startSiteAudit(finalUrl, {
-        onProgress: (data: DemoProgressEvent) => setProgress(data),
-        onPage: (data: DemoPageEvent) => setPages((prev) => [...prev, data]),
+        onProgress: (data: DemoProgressEvent) => { if (current === requestId.current) setProgress(data); },
+        onPage: (data: DemoPageEvent) => { if (current === requestId.current) setPages((prev) => [...prev, data]); },
         onComplete: (data: DemoCompleteEvent) => {
+          if (current !== requestId.current) return;
           setResult(data);
           setState('complete');
         },
         onError: (data) => {
+          if (current !== requestId.current) return;
           setErrorMsg(data.message);
           setState('error');
         },
@@ -106,6 +113,7 @@ export function DemoPage() {
   );
 
   const handleCancel = () => {
+    requestId.current++;
     controllerRef.current?.abort();
     setState('idle');
   };
@@ -145,13 +153,16 @@ export function DemoPage() {
             Free Site Audit
           </h1>
           <p className="mt-4 text-lg text-muted-foreground max-w-xl mx-auto">
-            Enter your website URL and get an instant audit — page inventory, content quality, and issue detection. No sign-up required.
+            Enter your website URL and preview discovered pages, content quality, and detected issues. No sign-up required.
           </p>
+
+          <p className="mt-3 text-sm text-muted-foreground">This site audit is separate from URL-only migration matching. Review migration proposals in your companion before exporting.</p>
 
           <form onSubmit={handleSubmit} className="mt-10 flex gap-3 max-w-lg mx-auto">
             <Input
               value={url}
               onChange={(e) => setUrl(e.target.value)}
+              aria-label="Website to audit"
               placeholder="example.com"
               className="flex-1"
               autoFocus
@@ -168,7 +179,7 @@ export function DemoPage() {
             <FileText className="h-8 w-8 text-muted-foreground mb-3" />
             <h3 className="font-semibold text-foreground mb-1">Page Inventory</h3>
             <p className="text-sm text-muted-foreground">
-              Discover every page on your site via sitemaps and crawling.
+              Discover pages through available sitemaps and crawling. This preview may not include every URL.
             </p>
           </Card>
           <Card className="p-6">
@@ -233,13 +244,13 @@ export function DemoPage() {
         )}
 
         {/* Progress (while running) */}
-        {state === 'running' && progress && (
+        {state === 'running' && (
           <Card className="p-6 mb-6">
             <div className="flex items-center gap-3 mb-3">
               <Loader2 className="h-5 w-5 animate-spin text-primary" />
-              <span className="font-medium text-foreground">{progress.message}</span>
+              <span role="status" className="font-medium text-foreground">{progress?.message || 'Connecting to the site audit…'}</span>
             </div>
-            {progress.phase === 'scraping' && progress.total_pages && (
+            {progress?.phase === 'scraping' && progress.total_pages && (
               <Progress
                 value={((progress.pages_scraped || 0) / progress.total_pages) * 100}
                 className="h-2"

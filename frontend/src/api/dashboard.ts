@@ -25,10 +25,10 @@ export interface DashboardData {
   }>;
 }
 
-export async function fetchDashboardData(): Promise<DashboardData> {
+export async function fetchDashboardData(signal?: AbortSignal): Promise<DashboardData> {
   try {
     const response = await fetch(`${API_BASE_URL}/api/user/dashboard`, {
-      method: 'GET',
+      method: 'GET', signal,
       headers: getAuthHeaders(),
     });
 
@@ -37,7 +37,9 @@ export async function fetchDashboardData(): Promise<DashboardData> {
       throw new Error(userError.message);
     }
 
-    return await response.json();
+    const data = await response.json();
+    if (data.success !== true || !Array.isArray(data.recent_sessions)) throw new Error('Dashboard data was incomplete. Try loading it again.');
+    return data;
   } catch (error: any) {
     // Handle network errors and other fetch failures
     if (error instanceof TypeError || error.name === 'AbortError') {

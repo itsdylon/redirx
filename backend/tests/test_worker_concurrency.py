@@ -2,7 +2,7 @@ import os
 import sys
 import unittest
 import asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -19,6 +19,8 @@ class WorkerConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.worker.running = True
         self.worker.max_concurrent = 2
         self.worker.in_flight_tasks = set()
+        self.worker.reclaim_expired_leases = AsyncMock(return_value=0)
+        self.worker._watch_tick = AsyncMock()
 
     async def test_dispatch_until_capacity_respects_limit(self):
         queued_jobs = [

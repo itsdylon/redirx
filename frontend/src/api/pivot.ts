@@ -65,9 +65,9 @@ export const listPivotMigrations = (cursor?: string, signal?: AbortSignal) =>
   request<{ items: PivotMigration[]; next_cursor?: string | null }>(`/migrations?limit=20${cursor ? `&cursor=${part(cursor)}` : ''}`, { signal });
 export const getPivotMigration = (id: string, signal?: AbortSignal) =>
   request<MigrationDetail>(`/migrations/${part(id)}`, { signal });
-export const listPivotMatches = (migration: string, run: string, cursor?: string, signal?: AbortSignal, filter: PivotMatchFilter = 'all') =>
+export const listPivotMatches = (migration: string, run: string, cursor?: string, signal?: AbortSignal, filter: PivotMatchFilter = 'all', limit: 20 | 500 = 20) =>
   request<{ items: PivotMatch[]; next_cursor?: string | null; selection_revision: number; jev?: JevRun }>(
-    `/migrations/${part(migration)}/runs/${part(run)}/matches?filter=${part(filter)}&limit=20${cursor ? `&cursor=${part(cursor)}` : ''}`, { signal });
+    `/migrations/${part(migration)}/runs/${part(run)}/matches?filter=${part(filter)}&limit=${limit}${cursor ? `&cursor=${part(cursor)}` : ''}`, { signal });
 export const resolvePivotMatch = (migration: string, run: string, decision: Record<string, unknown>, key: string, signal?: AbortSignal) =>
   request<{ outcomes: Array<{ code: string; message?: string }> }>(`/migrations/${part(migration)}/runs/${part(run)}/matches`,
     { ...post({ decisions: [decision], idempotency_key: key }, signal), method: 'PATCH' });
