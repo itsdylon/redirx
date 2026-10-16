@@ -150,6 +150,26 @@ class HistoryPages(unittest.TestCase):
         self.assertTrue(self.sql('SELECT has_function_privilege(%s,%s,\'EXECUTE\') AS allowed',['service_role',signature])[0]['allowed'])
 
 
+class HistoryWithoutTimezone(HistoryPages):
+    """Replay the entire paging/recovery contract against the actual legacy shape."""
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.sql(cls, "ALTER TABLE migration_sessions ALTER COLUMN created_at TYPE timestamp without time zone USING created_at AT TIME ZONE 'UTC'")
+
+    def test_native_http_response_preserves_naive_microseconds_and_cursor_progress(self):
+        ids=[str(row['id']) for row in self.history(2)]
+        for sid,stamp in zip(ids,['2026-01-01T00:00:00.123456','2026-01-01T00:00:00.123455']):
+            self.sql('UPDATE migration_sessions SET created_at=%s WHERE id=%s',[stamp,sid])
+        first=self.request('?pagination=cursor&limit=1')
+        self.assertEqual(first.status_code,200,first.json)
+        self.assertEqual(first.json['sessions'][0]['created_at'],'2026-01-01T00:00:00.123456')
+        second=self.request('?pagination=cursor&limit=1&cursor='+first.json['next_cursor'])
+        self.assertEqual(second.status_code,200,second.json)
+        self.assertEqual(second.json['sessions'][0]['id'],ids[1])
+        self.assertIsNone(second.json['next_cursor'])
+
+
 class LegacyProgress(unittest.TestCase):
     def test_repeated_or_malformed_drain_never_returns_partial_success(self):
         owner=str(uuid4());low='10000000-0000-0000-0000-000000000001';high='20000000-0000-0000-0000-000000000001'
