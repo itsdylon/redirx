@@ -31,6 +31,9 @@ class NativeQuery:
     def select(self, columns='*', **kwargs): self.columns=columns; return self
     def eq(self, key, value): self.filters.append((key,'=',value)); return self
     def gt(self, key, value): self.filters.append((key,'>',value)); return self
+    def is_(self, key, value):
+        if value != 'null': raise ValueError('Native fixture supports only IS NULL')
+        self.filters.append((key,'IS NULL',None)); return self
     def in_(self, key, value): self.filters.append((key,'IN',value)); return self
     def order(self, key, desc=False): self.orders.append((key,desc)); return self
     def limit(self, count): self.max_rows=count; return self
@@ -75,6 +78,9 @@ class NativeQuery:
                         else: statement=sql.SQL('SELECT {} FROM {}').format(fields,table)
                         clauses=[]
                         for key,operator,value in self.filters:
+                            if operator=='IS NULL':
+                                clauses.append(sql.SQL('{} IS NULL').format(column(key)))
+                                continue
                             if operator=='IN': clauses.append(sql.SQL('{}=ANY(%s)').format(column(key)))
                             else: clauses.append(sql.SQL('{} {} %s').format(column(key),sql.SQL(operator)))
                             args.append(value)

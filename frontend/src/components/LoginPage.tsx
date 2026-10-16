@@ -182,7 +182,7 @@ export function LoginPage() {
         </div>
 
         {error && (
-          <div className="bg-destructive/10 border border-destructive/50 text-destructive px-4 py-3 rounded mb-4">
+          <div role="alert" className="bg-destructive/10 border border-destructive/50 text-destructive px-4 py-3 rounded mb-4">
             {error}
           </div>
         )}
@@ -213,7 +213,7 @@ export function LoginPage() {
         )}
 
         {resendError && (
-          <div className="bg-destructive/10 border border-destructive/50 text-destructive px-4 py-3 rounded mb-4">
+          <div role="alert" className="bg-destructive/10 border border-destructive/50 text-destructive px-4 py-3 rounded mb-4">
             {resendError}
           </div>
         )}
@@ -252,30 +252,34 @@ export function LoginPage() {
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-foreground mb-2">
+            <label htmlFor="login-email" className="block text-sm font-medium text-foreground mb-2">
               Email
             </label>
             <Input
               type="email"
+              id="login-email"
               value={email}
               onChange={handleEmailChange}
               onBlur={handleEmailBlur}
               placeholder="you@example.com"
               required
               autoComplete="email"
+              aria-invalid={!!emailError}
+              aria-describedby={emailError ? 'login-email-error' : undefined}
               className={`w-full ${emailError ? 'border-destructive' : ''}`}
             />
             {emailError && (
-              <p className="text-destructive text-sm mt-1">{emailError}</p>
+              <p id="login-email-error" role="alert" className="text-destructive text-sm mt-1">{emailError}</p>
             )}
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-foreground mb-2">
+            <label htmlFor="login-password" className="block text-sm font-medium text-foreground mb-2">
               Password
             </label>
             <Input
               type="password"
+              id="login-password"
               value={password}
               onChange={handlePasswordChange}
               placeholder="Enter your password"

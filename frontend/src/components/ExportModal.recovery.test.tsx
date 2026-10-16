@@ -1,0 +1,20 @@
+import { act, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ExportModal } from './ExportModal';
+const mocks=vi.hoisted(()=>({preview:vi.fn(),file:vi.fn(),download:vi.fn(),success:vi.fn()}));
+vi.mock('../api/exportAPI',()=>({previewExport:mocks.preview,fetchExportFile:mocks.file}));
+vi.mock('../lib/legacyExport',async original=>({...await original<typeof import('../lib/legacyExport')>(),startTextDownload:mocks.download}));
+vi.mock('sonner',()=>({toast:{success:mocks.success,info:vi.fn()}}));
+const preview={success:true,content:'server-authoritative-rules',filename:'redirects.csv',included_count:1,excluded_count:0,excluded:[],warning:null};
+const onOpenChange=vi.fn();const onExport=vi.fn();
+const mount=()=>render(<ExportModal open sessionId="s" onOpenChange={onOpenChange} onExport={onExport} redirects={[]} />);
+beforeEach(()=>{vi.clearAllMocks();localStorage.setItem('redirx_default_export_format','csv');mocks.preview.mockResolvedValue(preview);mocks.file.mockResolvedValue(preview.content);});
+afterEach(()=>localStorage.clear());
+describe('export recovery',()=>{
+  it('downloads only exact server preview bytes and reports initiation once',async()=>{mount();const button=screen.getByRole('button',{name:'Download File'});await waitFor(()=>expect(button).toBeEnabled());await userEvent.click(button);expect(mocks.download).toHaveBeenCalledWith(preview.content,'redirects.csv');expect(mocks.success).toHaveBeenCalledTimes(1);expect(onOpenChange).toHaveBeenCalledWith(false);await waitFor(()=>expect(onExport).toHaveBeenCalled());});
+  it('keeps the modal open and requires new preview if saved rules changed',async()=>{mocks.file.mockResolvedValue('changed-server-rules');mount();const button=screen.getByRole('button',{name:'Download File'});await waitFor(()=>expect(button).toBeEnabled());await userEvent.click(button);expect(await screen.findByRole('alert')).toHaveTextContent('changed after this preview');expect(mocks.download).not.toHaveBeenCalled();expect(onOpenChange).not.toHaveBeenCalled();expect(button).toBeDisabled();mocks.preview.mockResolvedValue({...preview,content:'changed-server-rules'});await userEvent.click(screen.getByRole('button',{name:'Refresh preview'}));await waitFor(()=>expect(button).toBeEnabled());await userEvent.click(button);expect(mocks.download).toHaveBeenCalledWith('changed-server-rules','redirects.csv');});
+  it('surfaces denied preview and never enables a client-side fallback',async()=>{mocks.preview.mockRejectedValue(new Error('Source query cannot be represented'));mount();expect(await screen.findByRole('alert')).toHaveTextContent('Source query cannot be represented');expect(screen.getByRole('button',{name:'Download File'})).toBeDisabled();expect(mocks.download).not.toHaveBeenCalled();});
+  it('suppresses a late file result after unmount',async()=>{let resolve!:(value:string)=>void;mocks.file.mockReturnValue(new Promise<string>(yes=>{resolve=yes}));const view=mount();const button=screen.getByRole('button',{name:'Download File'});await waitFor(()=>expect(button).toBeEnabled());await userEvent.click(button);view.unmount();await act(async()=>resolve(preview.content));expect(mocks.download).not.toHaveBeenCalled();expect(onExport).not.toHaveBeenCalled();});
+  it('keeps browser initiation errors visible without claiming success',async()=>{mocks.download.mockImplementationOnce(()=>{throw new Error('Browser blocked download');});mount();const button=screen.getByRole('button',{name:'Download File'});await waitFor(()=>expect(button).toBeEnabled());await userEvent.click(button);expect(await screen.findByRole('alert')).toHaveTextContent('Browser blocked download');expect(mocks.success).not.toHaveBeenCalled();expect(onOpenChange).not.toHaveBeenCalled();});
+});

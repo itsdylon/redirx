@@ -84,6 +84,12 @@ class TestValidatePublicUrl(unittest.TestCase):
             "gopher://example.com/",
             "http://example.com:6379/",
             "https://example.com:8443/",
+            "http://example.com:0/",
+            "https://example.com:0/",
+            "https://example.com:not-a-port/",
+            "https://example.com:65536/",
+            "https://example.com:-1/",
+            "https://[invalid/",
         ):
             with self.assertRaises(SSRFBlockedError, msg=url):
                 validate_public_url(url)
@@ -166,6 +172,19 @@ class TestRedirectHopValidation(unittest.TestCase):
         status, _, _, _ = run(_fetch(session, "https://example.com/a", errors))
         self.assertEqual(status, 0)
         self.assertTrue(any("too many redirects" in e for e in errors))
+
+    def test_invalid_authority_is_blocked_before_any_hop_request(self):
+        for target in ("https://example.com:0/b", "https://example.com:bad/b",
+                       "https://example.com:65536/b"):
+            for redirect in (False, True):
+                with self.subTest(target=target, redirect=redirect):
+                    source = "https://example.com/a" if redirect else target
+                    session = RedirectingFakeSession({source: (302, target)} if redirect else {})
+                    errors = []
+                    status, text, _, _ = run(_fetch(session, source, errors))
+                    self.assertEqual((status, text), (0, ""))
+                    self.assertNotIn(target, session.requested)
+                    self.assertTrue(any("blocked target" in error for error in errors))
 
     def test_normal_redirect_followed(self):
         session = RedirectingFakeSession({
@@ -258,6 +277,14 @@ class TestDiscoveryEntryPoints(unittest.TestCase):
     def test_nonstandard_port_rejected(self):
         with self.assertRaises(DiscoveryError):
             normalize_root("https://example.com:6379")
+
+    def test_invalid_authorities_have_bounded_discovery_errors(self):
+        for url in ("https://example.com:0", "https://example.com:bad",
+                    "https://example.com:65536", "https://[invalid"):
+            with self.subTest(url=url):
+                with self.assertRaises(DiscoveryError) as ctx:
+                    normalize_root(url)
+                self.assertEqual(ctx.exception.user_message, "Cannot reach that host.")
 
 
 if __name__ == "__main__":

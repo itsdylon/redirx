@@ -52,7 +52,7 @@ describe('FileUploadZone — rendering', () => {
     });
     expect(screen.getByText('urls.csv')).toBeInTheDocument();
     expect(screen.getByText('42 rows')).toBeInTheDocument();
-    expect(screen.getByText('Click to replace file')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Replace file' })).toBeInTheDocument();
   });
 
   it('shows validation error when present', () => {
@@ -136,34 +136,34 @@ describe('FileUploadZone — drag and drop', () => {
     expect(props.onFileUpload).toHaveBeenCalledWith(file);
   });
 
-  it('rejects dropped files with unsupported extensions', () => {
+  it('delegates validation for dropped files with unsupported extensions', () => {
     const { props } = renderZone();
     const zone = screen.getByText(/Drag and drop/).closest('div[class]')!;
 
     const file = new File(['test'], 'data.json', { type: 'application/json' });
     fireEvent.drop(zone, createDragEvent(file));
 
-    expect(props.onFileUpload).not.toHaveBeenCalled();
+    expect(props.onFileUpload).toHaveBeenCalledWith(file);
   });
 
-  it('rejects dropped .pdf files', () => {
+  it('delegates validation for dropped .pdf files', () => {
     const { props } = renderZone();
     const zone = screen.getByText(/Drag and drop/).closest('div[class]')!;
 
     const file = new File(['test'], 'report.pdf', { type: 'application/pdf' });
     fireEvent.drop(zone, createDragEvent(file));
 
-    expect(props.onFileUpload).not.toHaveBeenCalled();
+    expect(props.onFileUpload).toHaveBeenCalledWith(file);
   });
 
-  it('rejects dropped .xls (legacy Excel) files', () => {
+  it('delegates validation for dropped .xls (legacy Excel) files', () => {
     const { props } = renderZone();
     const zone = screen.getByText(/Drag and drop/).closest('div[class]')!;
 
     const file = new File(['test'], 'old.xls', { type: 'application/vnd.ms-excel' });
     fireEvent.drop(zone, createDragEvent(file));
 
-    expect(props.onFileUpload).not.toHaveBeenCalled();
+    expect(props.onFileUpload).toHaveBeenCalledWith(file);
   });
 });
 
@@ -210,7 +210,7 @@ describe('FileUploadZone — removal', () => {
       onFileUpload,
     });
 
-    const removeButton = screen.getByRole('button');
+    const removeButton = screen.getByRole('button', { name: 'Remove urls.csv' });
     fireEvent.click(removeButton);
 
     expect(onFileRemove).toHaveBeenCalledTimes(1);
@@ -225,10 +225,19 @@ describe('FileUploadZone — removal', () => {
       onFileRemove,
     });
 
-    const removeButton = screen.getByRole('button');
+    const removeButton = screen.getByRole('button', { name: 'Remove urls.csv' });
     fireEvent.click(removeButton);
 
     expect(clickSpy).not.toHaveBeenCalled();
     clickSpy.mockRestore();
   });
+});
+
+it('announces a pending filename and lets the user cancel without opening the file picker', () => {
+  const { props, container } = renderZone({ checkingFileName: 'pending.xlsx' });
+  expect(screen.getByRole('status')).toHaveTextContent('Checking pending.xlsx');
+  expect(screen.getByText(/Nothing has been uploaded yet/)).toBeInTheDocument();
+  const input = container.querySelector('input')!; const open = vi.spyOn(input, 'click');
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel checking pending.xlsx' }));
+  expect(props.onFileRemove).toHaveBeenCalledOnce(); expect(open).not.toHaveBeenCalled();
 });

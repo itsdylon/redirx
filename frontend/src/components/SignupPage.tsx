@@ -230,7 +230,7 @@ export function SignupPage() {
         </div>
 
         {error && (
-          <div className="bg-destructive/10 border border-destructive/50 text-destructive px-4 py-3 rounded mb-4">
+          <div role="alert" className="bg-destructive/10 border border-destructive/50 text-destructive px-4 py-3 rounded mb-4">
             {error}
           </div>
         )}
@@ -269,11 +269,12 @@ export function SignupPage() {
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-foreground mb-2">
+            <label htmlFor="signup-fullName" className="block text-sm font-medium text-foreground mb-2">
               Full Name
             </label>
             <Input
               type="text"
+              id="signup-fullName"
               value={fullName}
               onChange={(e) => setFullName(e.target.value)}
               placeholder="John Doe"
@@ -284,30 +285,34 @@ export function SignupPage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-foreground mb-2">
+            <label htmlFor="signup-email" className="block text-sm font-medium text-foreground mb-2">
               Email
             </label>
             <Input
               type="email"
+              id="signup-email"
               value={email}
               onChange={handleEmailChange}
               onBlur={handleEmailBlur}
               placeholder="you@example.com"
               required
               autoComplete="email"
+              aria-invalid={!!emailError}
+              aria-describedby={emailError ? 'signup-email-error' : undefined}
               className={`w-full ${emailError ? 'border-destructive' : ''}`}
             />
             {emailError && (
-              <p className="text-destructive text-sm mt-1">{emailError}</p>
+              <p id="signup-email-error" role="alert" className="text-destructive text-sm mt-1">{emailError}</p>
             )}
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-foreground mb-2">
+            <label htmlFor="signup-password" className="block text-sm font-medium text-foreground mb-2">
               Password
             </label>
             <Input
               type="password"
+              id="signup-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="At least 8 characters"
@@ -424,11 +429,12 @@ export function SignupPage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-foreground mb-2">
+            <label htmlFor="signup-confirmPassword" className="block text-sm font-medium text-foreground mb-2">
               Confirm Password
             </label>
             <Input
               type="password"
+              id="signup-confirmPassword"
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               placeholder="Re-enter password"

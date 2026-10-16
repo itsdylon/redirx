@@ -47,6 +47,9 @@ class ProbeAgainstRealServer(unittest.IsolatedAsyncioTestCase):
         app.router.add_route("*", "/canonical-hop/", self._ok)
         app.router.add_route("*", "/slash-loop", self._slash_loop_bare)
         app.router.add_route("*", "/slash-loop/", self._slash_loop_slashed)
+        app.router.add_route("*", "/params;v1", self._parameter_hop)
+        app.router.add_route("*", "/params;v2", self._parameter_target)
+        self.raw_requests = []
 
         self.head_hostile_methods = []
 
@@ -122,6 +125,14 @@ class ProbeAgainstRealServer(unittest.IsolatedAsyncioTestCase):
     async def _slash_loop_slashed(self, request):
         return web.Response(status=301, headers={"Location": f"{self.base}/slash-loop"})
 
+    async def _parameter_hop(self, request):
+        self.raw_requests.append(request.raw_path)
+        return web.Response(status=301, headers={"Location": "/params;v2?b=2&a=1"})
+
+    async def _parameter_target(self, request):
+        self.raw_requests.append(request.raw_path)
+        return web.Response(status=200)
+
     # -- tests -------------------------------------------------------------
 
     async def test_plain_200_records_no_hops(self):
@@ -132,6 +143,13 @@ class ProbeAgainstRealServer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             rp.classify(result, f"{self.base}/ok")[0], rp.NO_REDIRECT
         )
+
+    async def test_semicolon_path_and_query_order_arrive_on_the_wire(self):
+        result = await rp.probe(self.session, f"{self.base}/params;v1")
+        self.assertEqual(result.final_status, 200)
+        self.assertIsNone(result.error)
+        self.assertEqual(self.raw_requests, ['/params;v1', '/params;v2?b=2&a=1'])
+        self.assertIsNone(rp.classify(result, f"{self.base}/params;v2?b=2&a=1"))
 
     async def test_single_hop_is_followed_to_the_destination(self):
         result = await rp.probe(self.session, f"{self.base}/one-hop")

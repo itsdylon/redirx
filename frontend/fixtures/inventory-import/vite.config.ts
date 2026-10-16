@@ -1,0 +1,7 @@
+import { mergeConfig } from 'vite';
+import path from 'node:path';
+import base from '../../vite.config';
+export default mergeConfig(base, {
+  resolve: { alias: { '../contexts/AuthContext': path.resolve(__dirname, 'auth.ts') } },
+  server: { port: 4285, host: '127.0.0.1', open: false, strictPort: true },
+});

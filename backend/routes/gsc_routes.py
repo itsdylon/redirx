@@ -12,7 +12,7 @@ import re
 from flask import Blueprint, jsonify, redirect, request
 
 from backend.services.auth_service import require_auth
-from backend.services.gsc_service import GSCError, GSCService
+from backend.services.gsc_service import GSCError, GSCService, verify_state_token
 from src.redirx.config import Config
 from src.redirx.database import MigrationSessionDB
 
@@ -77,20 +77,24 @@ def gsc_callback():
         # retry a failed agent callback through the legacy JWT-state handler.
         from backend.routes.migration_gsc_routes import agent_callback_response
         return agent_callback_response()
-    if request.args.get('error'):
-        # User cancelled on the consent screen.
-        return _frontend_redirect('/', 'cancelled')
-
     code = request.args.get('code')
-    if not code or not state:
+    if not state:
         return _frontend_redirect('/', 'error')
 
     try:
         service = GSCService()
-        payload = service.handle_callback(code, state)
+        payload = service.handle_callback(code, state, request.args.get('error'))
         return_to = _safe_return_to(payload.get('return_to', '/'))
-        return _frontend_redirect(return_to, 'connected')
-    except (GSCError, ValueError):
+        return _frontend_redirect(return_to, payload['consent_result'])
+    except GSCError as exc:
+        if exc.code == 'gsc_connection_unconfirmed':
+            try:
+                return_to = _safe_return_to(verify_state_token(state).get('return_to', '/'))
+            except GSCError:
+                return_to = '/'
+            return _frontend_redirect(return_to, 'unconfirmed')
+        return _frontend_redirect('/', 'error')
+    except ValueError:
         return _frontend_redirect('/', 'error')
 
 

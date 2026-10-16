@@ -12,6 +12,9 @@ import {
   type GscResultsMeta,
 } from '../api/gsc';
 import { queryKeys } from '../queries/queryKeys';
+import { monitoringKeys } from '../queries/monitoringKeys';
+import { useAuth } from '../contexts/AuthContext';
+import { useRequestScope } from './pivot/useRequestScope';
 
 interface GscTrafficCardProps {
   sessionId: string;
@@ -25,6 +28,13 @@ interface GscTrafficCardProps {
  * are synced, shows which high-traffic URLs lack a confident match.
  */
 export function GscTrafficCard({ sessionId, gscMeta }: GscTrafficCardProps) {
+  const { user } = useAuth();
+  if (!user) return null;
+  return <GscTrafficContent key={`${user.id}:${sessionId}`} sessionId={sessionId} gscMeta={gscMeta} ownerId={user.id} />;
+}
+
+function GscTrafficContent({ sessionId, gscMeta, ownerId }: GscTrafficCardProps & { ownerId: string }) {
+  const scope = useRequestScope(`${ownerId}:${sessionId}`);
   const queryClient = useQueryClient();
   const posthog = usePostHog();
   const location = useLocation();
@@ -32,13 +42,14 @@ export function GscTrafficCard({ sessionId, gscMeta }: GscTrafficCardProps) {
   const autoSyncTriggeredRef = useRef(false);
 
   const statusQuery = useQuery({
-    queryKey: queryKeys.gsc.status,
-    queryFn: getGscStatus,
+    queryKey: monitoringKeys.gscStatus(ownerId),
+    queryFn: ({ signal }) => getGscStatus(signal),
   });
 
   const syncMutation = useMutation({
-    mutationFn: () => syncGscSession(sessionId),
+    mutationFn: () => syncGscSession(sessionId, undefined, scope.signal()),
     onSuccess: (data) => {
+      if (scope.signal().aborted) return;
       posthog?.capture('gsc_sync_completed', {
         session_id: sessionId,
         matched_urls: data.matched_urls,
@@ -51,6 +62,7 @@ export function GscTrafficCard({ sessionId, gscMeta }: GscTrafficCardProps) {
       queryClient.invalidateQueries({ queryKey: queryKeys.results.bySession(sessionId) });
     },
     onError: (error) => {
+      if (scope.signal().aborted) return;
       toast.error(error instanceof Error ? error.message : 'Failed to pull Search Console data');
     },
   });
@@ -69,12 +81,31 @@ export function GscTrafficCard({ sessionId, gscMeta }: GscTrafficCardProps) {
     setSearchParams(next, { replace: true });
 
     if (gscParam === 'connected') {
-      toast.success('Google Search Console connected');
-      queryClient.invalidateQueries({ queryKey: queryKeys.gsc.status });
-      if (!autoSyncTriggeredRef.current && !synced) {
-        autoSyncTriggeredRef.current = true;
-        syncMutation.mutate();
-      }
+      // Return parameters are navigation hints, never proof of authorization.
+      void getGscStatus(scope.signal()).then(status => {
+        if (scope.signal().aborted) return;
+        queryClient.setQueryData(monitoringKeys.gscStatus(ownerId), status);
+        if (!status.connected) { toast.info('Search Console is not connected. Connect to continue.'); return; }
+        toast.success('Google Search Console connected');
+        if (!autoSyncTriggeredRef.current && !synced) {
+          autoSyncTriggeredRef.current = true;
+          syncMutation.mutate();
+        }
+      }).catch(() => { if (!scope.signal().aborted) toast.error('Search Console connection could not be verified. Retry its status.'); });
+    } else if (gscParam === 'unconfirmed') {
+      toast.info('The connection attempt was not confirmed. Checking saved connection status.');
+      // A lost callback acknowledgment may follow a committed connection. Read
+      // authoritative state, but never repeat consent or automatically sync.
+      void statusQuery.refetch().then(result => {
+        if (scope.signal().aborted) return;
+        if (result.isError || !result.data) {
+          toast.error('Connection status is still unconfirmed. Retry Search Console status.');
+        } else if (result.data.connected) {
+          toast.info('A Search Console connection is saved. You can pull traffic when ready.');
+        } else {
+          toast.info('No Search Console connection is saved. Start a new connection if needed.');
+        }
+      });
     } else if (gscParam === 'cancelled') {
       toast.info('Search Console connection cancelled');
     } else if (gscParam === 'error') {
@@ -86,9 +117,10 @@ export function GscTrafficCard({ sessionId, gscMeta }: GscTrafficCardProps) {
   const handleConnect = async () => {
     posthog?.capture('gsc_connect_clicked', { session_id: sessionId });
     try {
-      const url = await getGscConnectUrl(location.pathname);
-      window.location.href = url;
+      const url = await getGscConnectUrl(location.pathname, scope.signal());
+      if (!scope.signal().aborted) window.location.href = url;
     } catch (error) {
+      if (scope.signal().aborted) return;
       toast.error(
         error instanceof Error ? error.message : 'Could not start the Search Console connection'
       );
@@ -98,6 +130,7 @@ export function GscTrafficCard({ sessionId, gscMeta }: GscTrafficCardProps) {
   // Deployment has no Google OAuth client configured; stay out of the way.
   if (statusQuery.data?.configured === false) return null;
   if (statusQuery.isLoading) return null;
+  if (statusQuery.isError) return <div className="mb-4 border border-border bg-card p-4"><p role="alert">Search Console status could not load. No connection status has been confirmed.</p><Button className="mt-3" variant="outline" disabled={statusQuery.isFetching} onClick={() => void statusQuery.refetch()}>Retry Search Console status</Button></div>;
 
   if (synced && gscMeta?.riskSummary) {
     const summary = gscMeta.riskSummary;
@@ -106,7 +139,7 @@ export function GscTrafficCard({ sessionId, gscMeta }: GscTrafficCardProps) {
         <div className="mb-4 border border-border bg-card p-4 flex items-center gap-3">
           <BarChart3 className="h-4 w-4 text-muted-foreground flex-shrink-0" />
           <p className="text-sm text-muted-foreground">
-            Search Console found no organic traffic for these URLs in the last 90 days
+            Search Console recorded no clicks or impressions for these URLs in the last 90 days
             {gscMeta.property ? ` (property: ${gscMeta.property})` : ''}.
           </p>
         </div>
@@ -139,7 +172,7 @@ export function GscTrafficCard({ sessionId, gscMeta }: GscTrafficCardProps) {
               {summary.totalImpressions.toLocaleString()} impressions across{' '}
               {summary.urlsWithTraffic} URLs with traffic (last 90 days
               {gscMeta.property ? `, ${gscMeta.property}` : ''}). Sorted by traffic so the
-              riskiest URLs come first.
+              riskiest URLs come first. A confident suggestion still needs explicit review; it is not verified deployment.
             </p>
           </div>
         </div>

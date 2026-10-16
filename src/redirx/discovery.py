@@ -121,14 +121,18 @@ def normalize_root(raw: str) -> str:
     if "://" not in candidate:
         candidate = f"https://{candidate}"
 
-    parsed = urlparse(candidate)
-    host = (parsed.hostname or "").strip(".").lower()
+    try:
+        parsed = urlparse(candidate)
+        host = (parsed.hostname or "").strip(".").lower()
+        port = parsed.port
+    except (ValueError, TypeError) as exc:
+        raise DiscoveryError("invalid_domain", "Cannot reach that host.") from exc
     if parsed.scheme not in ("http", "https") or not host or "." not in host:
         raise DiscoveryError(
             "invalid_domain",
             f"'{raw}' does not look like a valid domain.",
         )
-    if parsed.port and parsed.port not in (80, 443):
+    if port is not None and port not in (80, 443):
         raise DiscoveryError("invalid_domain", "Cannot reach that host.")
     return f"{parsed.scheme}://{host}"
 

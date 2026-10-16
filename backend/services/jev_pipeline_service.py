@@ -10,6 +10,7 @@ from .migration_repository import MigrationRepository, InvalidInputError, Operat
 from .migration_planning_service import validate_key
 from .migration_run_service import MigrationRunService, _uuid
 from .jev_store import read_jev_state
+from .jev_database_transport import database_read
 
 PAID_LIMITS = {'old_pages': 15000, 'new_pages': 20000, 'inventory_bytes': 16777216, 'passes': 3, 'days': 30}
 
@@ -148,14 +149,14 @@ class JevService:
                          'provider_requests_reserved':state['provider_requests']}
         counted=[]
         for offset in range(0,15000,500):
-            page=self.client.table('jev_proposals').select('old_url_hash,pass').eq('run_id',str(run_id)).order('old_url_hash').range(offset,offset+499).execute().data
+            page=database_read(lambda: self.client.table('jev_proposals').select('old_url_hash,pass').eq('run_id',str(run_id)).order('old_url_hash').range(offset,offset+499).execute().data)
             counted.extend(page)
             if len(page)<500: break
         result['jev']['completed_proposals']=sum(row['pass']==state['pass'] for row in counted)
         result['jev']['confirmed_examples']=len(state['seeds'])
         ids = [item['mapping_id'] for item in result.get('items', [])]
         if ids:
-            rows = self.client.table('jev_proposals').select('*').eq('run_id',str(run_id)).in_('mapping_id',ids).execute().data
+            rows = database_read(lambda: self.client.table('jev_proposals').select('*').eq('run_id',str(run_id)).in_('mapping_id',ids).execute().data)
             by_id = {str(row['mapping_id']):row for row in rows}
             for item in result['items']:
                 row = by_id.get(str(item['mapping_id']))

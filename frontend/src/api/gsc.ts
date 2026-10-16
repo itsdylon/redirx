@@ -50,7 +50,9 @@ async function request<T>(path: string, init: RequestInit): Promise<T> {
       const userError = await handleApiError(null, response);
       throw new Error(userError.message);
     }
-    return await response.json();
+    const data = await response.json();
+    if (data?.success === false) throw new Error(typeof data.user_message === 'string' ? data.user_message : 'Search Console could not complete this request. Try again.');
+    return data;
   } catch (error: any) {
     if (error instanceof TypeError || error.name === 'AbortError') {
       const userError = await handleApiError(error);
@@ -65,14 +67,19 @@ export interface GscProperty {
   permission_level: string;
 }
 
-export function getGscStatus(): Promise<GscStatusResponse> {
-  return request('/api/gsc/status', { method: 'GET', headers: getAuthHeaders() });
+export async function getGscStatus(signal?: AbortSignal): Promise<GscStatusResponse> {
+  const data = await request<GscStatusResponse>('/api/gsc/status', { method: 'GET', headers: getAuthHeaders(), signal });
+  if (!data || data.success !== true || typeof data.connected !== 'boolean'
+      || (data.configured !== undefined && typeof data.configured !== 'boolean')) {
+    throw new Error('Search Console returned an invalid connection status. Retry its status.');
+  }
+  return data;
 }
 
-export async function getGscProperties(): Promise<GscProperty[]> {
+export async function getGscProperties(signal?: AbortSignal): Promise<GscProperty[]> {
   const data = await request<{ success: boolean; properties: GscProperty[] }>(
     '/api/gsc/properties',
-    { method: 'GET', headers: getAuthHeaders() }
+    { method: 'GET', headers: getAuthHeaders(), signal }
   );
   return data.properties ?? [];
 }
@@ -112,17 +119,17 @@ export function propertyCovers(siteUrl: string, domain: string): boolean {
   }
 }
 
-export async function getGscConnectUrl(returnTo: string): Promise<string> {
+export async function getGscConnectUrl(returnTo: string, signal?: AbortSignal): Promise<string> {
   const data = await request<{ success: boolean; authorization_url: string }>(
     `/api/gsc/connect?return_to=${encodeURIComponent(returnTo)}`,
-    { method: 'GET', headers: getAuthHeaders() }
+    { method: 'GET', headers: getAuthHeaders(), signal }
   );
   return data.authorization_url;
 }
 
-export function syncGscSession(sessionId: string, property?: string): Promise<GscSyncResponse> {
+export function syncGscSession(sessionId: string, property?: string, signal?: AbortSignal): Promise<GscSyncResponse> {
   return request(`/api/gsc/sessions/${sessionId}/sync`, {
-    method: 'POST',
+    method: 'POST', signal,
     headers: getAuthHeaders(),
     body: JSON.stringify(property ? { property } : {}),
   });

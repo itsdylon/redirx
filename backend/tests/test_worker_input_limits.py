@@ -19,7 +19,7 @@ class WorkerInputLimitTests(unittest.IsolatedAsyncioTestCase):
         self.worker.worker_id = "worker-test"
         self.worker.release_lease = AsyncMock()
 
-        async def fake_lease_extension_loop(_session_id):
+        async def fake_lease_extension_loop(_session_id, *, attempt_count):
             try:
                 while True:
                     await asyncio.sleep(3600)
@@ -65,6 +65,7 @@ class WorkerInputLimitTests(unittest.IsolatedAsyncioTestCase):
                 patch("backend.services.job_limits.PIVOT_CONTENT_MAX_OLD_URLS", 4), \
                 patch("backend.worker.MigrationRunService") as authority, \
                 patch("backend.worker.DeepPreviewService"), \
+                patch("backend.services.jev_pipeline_service.JevService.state", return_value=None), \
                 patch("backend.worker.Config.validate_embeddings"), \
                 patch("backend.worker.Pipeline", side_effect=RuntimeError("pipeline reached")) as pipeline, \
                 patch("backend.worker.traceback.print_exc"):

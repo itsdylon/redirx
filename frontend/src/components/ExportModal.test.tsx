@@ -3,6 +3,8 @@ import { render, screen } from '@testing-library/react';
 import { ExportModal } from './ExportModal';
 import type { RedirectMapping } from './ReviewInterface';
 
+vi.mock('../api/exportAPI', () => ({ previewExport: vi.fn().mockResolvedValue({success:true,content:'fixture rules',filename:'rules.txt',included_count:1,excluded_count:0,excluded:[],warning:null}), fetchExportFile: vi.fn() }));
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -31,6 +33,7 @@ function makeRedirects(overrides: Partial<RedirectMapping>[] = []): RedirectMapp
 function renderModal(redirects = makeRedirects()) {
   return render(
     <ExportModal
+      sessionId="fixture-session"
       open={true}
       onOpenChange={vi.fn()}
       onExport={vi.fn()}
@@ -68,7 +71,7 @@ describe('ExportModal — localStorage format default', () => {
     renderModal();
 
     // The select trigger should display the saved format
-    expect(screen.getByText('Nginx map')).toBeInTheDocument();
+    expect(screen.getByText('Nginx server rules')).toBeInTheDocument();
   });
 
   it('pre-selects apache format from localStorage', () => {
@@ -112,7 +115,8 @@ describe('ExportModal — localStorage format default', () => {
 
     // Invalid value is treated as the select value, but since it doesn't match
     // any option, the component should still render without crashing
-    expect(screen.queryByText('Select Format')).not.toBeInTheDocument();
+    expect(screen.getByText('Select Format')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Download File' })).toBeDisabled();
   });
 });
 

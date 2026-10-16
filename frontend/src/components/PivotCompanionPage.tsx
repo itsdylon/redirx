@@ -1,3 +1,4 @@
+import { useAuth } from '../contexts/AuthContext';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { usePostHog } from '@posthog/react';
@@ -9,8 +10,13 @@ import { useRequestScope } from './pivot/useRequestScope';
 
 const MCP_URL = 'https://redirx-mcp-server.onrender.com/mcp';
 export function PivotCompanionPage() {
+  const { user } = useAuth();
+  if (!user) return <ToolLayout title="Migration companion"><p role="status">Sign in to view your migrations.</p></ToolLayout>;
+  return <OwnedCompanionPage key={user.id} ownerId={user.id} />;
+}
+function OwnedCompanionPage({ ownerId }: { ownerId: string }) {
   const posthog = usePostHog();
-  const scope = useRequestScope('companion');
+  const scope = useRequestScope(ownerId);
   const [items, setItems] = useState<PivotMigration[]>([]);
   const [next, setNext] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -28,7 +34,7 @@ export function PivotCompanionPage() {
     finally { if (!signal.aborted) setBusy(false); }
   }
   useEffect(() => { void load(); }, []);
-  return <ToolLayout title="Migration companion"><main className="mx-auto max-w-4xl space-y-8 py-4">
+  return <ToolLayout title="Migration companion"><div className="mx-auto max-w-4xl space-y-8 py-4">
     <header className="space-y-3">
       <h1 className="text-3xl font-semibold">Your migrations</h1>
       <Link to="/billing/current" className="text-sm underline">Plans and billing</Link>
@@ -42,7 +48,7 @@ export function PivotCompanionPage() {
     </section>
     <p className="text-sm text-muted-foreground">Free while we build: up to 500 old URLs, 2,000 new URLs, 2 MiB of URL text, five new runs per 24 hours and three passes per run. No page-content scraping. Known, verified URL pairs can guide matching.</p>
     <section aria-labelledby="history-heading" className="space-y-3 border-t pt-6">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 id="history-heading" className="text-lg font-semibold">Migration history</h2>
         <Button variant="outline" disabled={busy} onClick={() => void load()}>Refresh history</Button>
       </div>
@@ -60,5 +66,5 @@ export function PivotCompanionPage() {
       {next && <Button variant="outline" disabled={busy} onClick={() => void load(next)}>Load more migrations</Button>}
     </section>
 
-  </main></ToolLayout>;
+  </div></ToolLayout>;
 }

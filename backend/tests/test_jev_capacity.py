@@ -22,9 +22,11 @@ from backend.services.jev_runner import JevPipelineRunner,DurableEmbeddingCache
 from src.redirx.jev.jev import JevClient,MODEL
 
 class FakeOpenAI:
-    def __init__(self):self.embeddings=self
+    def __init__(self):self.embeddings=self;self.with_raw_response=self
     def create(self,model,input):
-        return SimpleNamespace(data=[SimpleNamespace(index=i,embedding=[math.sin(j+len(text)) for j in range(1536)]) for i,text in enumerate(input)],usage=SimpleNamespace(total_tokens=sum(max(1,len(text)//4) for text in input)))
+        from backend.tests.test_jev_embedding_memory import raw_response
+        tokens=sum(max(1,len(text)//4) for text in input)
+        return raw_response(SimpleNamespace(model=model,data=[SimpleNamespace(index=i,embedding=[math.sin(j+len(text)) for j in range(1536)]) for i,text in enumerate(input)],usage=SimpleNamespace(prompt_tokens=tokens,total_tokens=tokens)))
 
 class FakeTypeSafe:
     def system_one(self,state,questions,model):

@@ -11,8 +11,11 @@ import logging
 
 import aiohttp
 
-from src.redirx.redirect_probe import probe, MAX_HOPS
+from src.redirx.redirect_probe import (probe, MAX_HOPS, request_target_preserved,
+    REQUEST_URL_REWRITTEN, REQUEST_URL_REWRITTEN_DETAIL)
 from src.redirx.safe_fetch import create_safe_connector
+from src.redirx.rate_limit import (HostRateLimiter, WATCH_NAMESPACE, WATCH_CAPACITY,
+    WATCH_RATE, set_limiter, reset_limiter)
 from .analytics_service import AppEvent, capture
 from .inventory_policy import canonical_url_identity, InventoryPolicyError
 from .migration_repository import (MigrationRepository, MigrationRepositoryError,
@@ -50,10 +53,16 @@ def assess_probe(result, expected_url):
         hop['location'] = hop['location'][:1024]
         if hop['url']:
             hop['url'] = hop['url'][:1024]
-    if result.error in ('loop', 'too_many_hops'):
+    if result.error == REQUEST_URL_REWRITTEN:
+        state, issue = 'unchecked', REQUEST_URL_REWRITTEN
+        evidence['detail'] = REQUEST_URL_REWRITTEN_DETAIL
+    elif result.error in ('loop', 'too_many_hops'):
         state, issue = 'failed', 'redirect_loop'
     elif result.error:
         state, issue = 'unchecked', ('blocked' if result.error == 'blocked' else 'unavailable')
+    elif not request_target_preserved(expected_url):
+        state, issue = 'unchecked', REQUEST_URL_REWRITTEN
+        evidence['detail'] = REQUEST_URL_REWRITTEN_DETAIL
     elif result.final_status in (401, 403, 429) or (result.final_status or 0) >= 500:
         state, issue = 'unchecked', 'origin_unavailable'
     elif result.final_status in (404, 410):
@@ -198,6 +207,22 @@ class MigrationVerificationService:
 
 
 async def run_verification_batch(service, worker_id, batch_size=50):
+    """Pace included checks and recurring monitoring with the shared host budget.
+
+    The monitoring adapter calls this same entry point. A connection semaphore
+    limits simultaneous sockets but does not provide per-host rate/backoff rules.
+    Restore the caller's context even when claiming, probing or cancellation fails.
+    Existing limiter enablement and fail-open infrastructure policy still apply.
+    """
+    token = set_limiter(HostRateLimiter(namespace=WATCH_NAMESPACE,
+        capacity=WATCH_CAPACITY, rate=WATCH_RATE))
+    try:
+        return await _run_verification_batch(service, worker_id, batch_size)
+    finally:
+        reset_limiter(token)
+
+
+async def _run_verification_batch(service, worker_id, batch_size=50):
     """One callable worker unit; re-invoke until claim returns no available work.
 
     No user-supplied connector/prober injection exists in production. Tests patch

@@ -611,3 +611,8 @@ def get_limiter() -> Optional["HostRateLimiter"]:
 def set_limiter(limiter: Optional["HostRateLimiter"]):
     """Install the limiter for the current async context. Returns the token."""
     return _current_limiter.set(limiter)
+
+
+def reset_limiter(token):
+    """Restore the caller's async context after a bounded job finishes."""
+    _current_limiter.reset(token)

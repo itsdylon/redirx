@@ -137,21 +137,19 @@ class MigrationRunService:
     def finalize_session(self, job, worker_id, status, error=None):
         if status == 'completed':
             self._dispatch_activation(job)
-        # Read the pre-call session status so a terminal outcome fires exactly
-        # once. finalize_migration_run_session's own early-return branch (an
-        # already-terminal session, e.g. a retried worker call after a lost
-        # response) returns the same JSON shape as a real transition — no
-        # 'replayed' flag distinguishes them here the way other RPCs do — so
-        # the distinguishing read has to happen on this side of the call.
-        # worker.py never runs two finalize_session calls for the same job
-        # concurrently (one lease, one worker at a time), so this is a plain
-        # before/after compare, not a race-prone one.
+        # Best-effort suppression of an already-observed terminal replay.
+        # The RPC returns durable state, not a transition/replayed receipt. An
+        # expired attempt can overlap a newer worker, so this pre-read cannot
+        # guarantee exactly-once telemetry. Keep the observed outcome intact
+        # for callers; never treat a different terminal result as this request.
         pre_status = self._session_status(job.get('id'))
         result = self._call('finalize_migration_run_session', {
             **self._worker_params(job, worker_id), 'p_status': status,
             'p_error': str(error)[:5000] if error is not None else None,
         })
-        if status in ('completed', 'permanently_failed') and pre_status not in ('completed', 'permanently_failed'):
+        expected = {'completed': 'succeeded', 'permanently_failed': 'failed'}
+        if (status in expected and result.get('status') == expected[status]
+                and pre_status not in ('completed', 'permanently_failed')):
             self._capture_run_completed(job, result)
         return result
 

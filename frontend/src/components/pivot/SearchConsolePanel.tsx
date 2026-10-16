@@ -2,9 +2,16 @@ import { useState } from 'react';
 import { gscAction, type GscData } from '../../api/pivot';
 import { Button } from '../ui/button';
 import { useRequestScope } from './useRequestScope';
+import { useAuth } from '../../contexts/AuthContext';
 
 export function SearchConsolePanel({ migrationId }: { migrationId?: string }) {
-  const scope = useRequestScope(`gsc:${migrationId || 'account'}`);
+  const { user } = useAuth();
+  if (!user) return null;
+  return <SearchConsoleContent key={`${user.id}:${migrationId || 'account'}`} ownerId={user.id} migrationId={migrationId} />;
+}
+
+function SearchConsoleContent({ ownerId, migrationId }: { ownerId: string; migrationId?: string }) {
+  const scope = useRequestScope(`gsc:${ownerId}:${migrationId || 'account'}`);
   const [data, setData] = useState<GscData>({});
   const [property, setProperty] = useState('');
   const [busy, setBusy] = useState(false);
@@ -17,6 +24,7 @@ export function SearchConsolePanel({ migrationId }: { migrationId?: string }) {
         ...(action === 'sync' ? { property } : {}) }, scope.key(`${action}:${property}`), signal);
       if (signal.aborted) return;
       if (response.data.authorization_url) { window.location.assign(response.data.authorization_url); return; }
+      if (response.data.properties && !response.data.properties.some(item => item.site_url === property)) setProperty('');
       setData(current => ({ ...current, ...response.data }));
       setMessage(response.data.summary || `Search Console: ${response.data.connection_state || 'updated'}.`);
     } catch (error) {
@@ -32,7 +40,7 @@ export function SearchConsolePanel({ migrationId }: { migrationId?: string }) {
       <Button variant="outline" disabled={busy} onClick={() => void act('properties')}>Load properties</Button>
     </div>
     {data.properties && <label className="block max-w-lg space-y-2 text-sm">Search Console property
-      <select className="block w-full rounded-md border bg-background p-2" value={property} onChange={e => setProperty(e.target.value)}>
+      <select className="block w-full rounded-md border bg-background p-2" value={property} disabled={busy} onChange={e => setProperty(e.target.value)}>
         <option value="">Select a property</option>
         {data.properties.map(item => <option key={item.site_url} value={item.site_url}>{item.site_url}</option>)}
       </select>

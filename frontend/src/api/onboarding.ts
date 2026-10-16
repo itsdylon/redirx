@@ -48,10 +48,10 @@ export interface SampleSessionResponse {
   approved_mappings: number;
 }
 
-export async function getOnboarding(): Promise<OnboardingResponse> {
+export async function getOnboarding(signal?: AbortSignal): Promise<OnboardingResponse> {
   try {
     const response = await fetch(`${API_BASE_URL}/api/user/onboarding`, {
-      method: 'GET',
+      method: 'GET', signal,
       headers: getAuthHeaders(),
     });
 
@@ -60,7 +60,9 @@ export async function getOnboarding(): Promise<OnboardingResponse> {
       throw new Error(userError.message);
     }
 
-    return await response.json();
+    const data = await response.json();
+    if (data.success !== true) throw new Error('Onboarding was not confirmed. Please try again.');
+    return data;
   } catch (error: any) {
     if (error instanceof TypeError || error.name === 'AbortError') {
       const userError = await handleApiError(error);
@@ -71,11 +73,11 @@ export async function getOnboarding(): Promise<OnboardingResponse> {
 }
 
 export async function updateOnboarding(
-  payload: OnboardingUpdatePayload
+  payload: OnboardingUpdatePayload, signal?: AbortSignal
 ): Promise<OnboardingResponse> {
   try {
     const response = await fetch(`${API_BASE_URL}/api/user/onboarding`, {
-      method: 'PATCH',
+      method: 'PATCH', signal,
       headers: getAuthHeaders(),
       body: JSON.stringify(payload),
     });
@@ -85,7 +87,9 @@ export async function updateOnboarding(
       throw new Error(userError.message);
     }
 
-    return await response.json();
+    const data = await response.json();
+    if (data.success !== true) throw new Error('Onboarding was not confirmed. Please try again.');
+    return data;
   } catch (error: any) {
     if (error instanceof TypeError || error.name === 'AbortError') {
       const userError = await handleApiError(error);
@@ -95,10 +99,10 @@ export async function updateOnboarding(
   }
 }
 
-export async function createOnboardingSampleSession(): Promise<SampleSessionResponse> {
+export async function createOnboardingSampleSession(signal?: AbortSignal): Promise<SampleSessionResponse> {
   try {
     const response = await fetch(`${API_BASE_URL}/api/user/onboarding/sample-session`, {
-      method: 'POST',
+      method: 'POST', signal,
       headers: getAuthHeaders(),
     });
 
@@ -107,7 +111,9 @@ export async function createOnboardingSampleSession(): Promise<SampleSessionResp
       throw new Error(userError.message);
     }
 
-    return await response.json();
+    const data = await response.json();
+    if (data.success !== true || typeof data.session_id !== 'string' || !data.session_id) throw new Error('Onboarding was not confirmed. Please try again.');
+    return data;
   } catch (error: any) {
     if (error instanceof TypeError || error.name === 'AbortError') {
       const userError = await handleApiError(error);

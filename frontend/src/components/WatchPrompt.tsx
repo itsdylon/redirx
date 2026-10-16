@@ -5,7 +5,8 @@ import { toast } from 'sonner';
 
 import { Card } from './ui/card';
 import { Button } from './ui/button';
-import { queryKeys } from '../queries/queryKeys';
+import { monitoringKeys } from '../queries/monitoringKeys';
+import { useRequestScope } from './pivot/useRequestScope';
 import { createWatch, listWatches } from '../api/watch';
 import { useAuth } from '../contexts/AuthContext';
 import { isEnterprisePlan } from '../lib/plans';
@@ -22,32 +23,40 @@ import { MCP_PIVOT_ENABLED } from '../api/config';
  * doubles as the way back into monitoring for a returning user.
  */
 export function WatchPrompt({ sessionId, pivotEnabled = MCP_PIVOT_ENABLED }: { sessionId: string; pivotEnabled?: boolean }) {
+  const { user } = useAuth();
+  if (!user) return null;
+  return <WatchPromptContent key={`${user.id}:${sessionId}`} sessionId={sessionId} pivotEnabled={pivotEnabled} ownerId={user.id} plan={user.plan} />;
+}
+
+function WatchPromptContent({ sessionId, pivotEnabled, ownerId, plan }: { sessionId: string; pivotEnabled: boolean; ownerId: string; plan?: string }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { user } = useAuth();
+  const scope = useRequestScope(`${ownerId}:${sessionId}`);
   // Legacy creation is plan-gated. Pivot mode retains existing watch access,
   // including for lapsed plans, but acquires no new legacy watches.
-  const paidPlan = isEnterprisePlan(user?.plan);
+  const paidPlan = isEnterprisePlan(plan);
 
   const watchesQuery = useQuery({
-    queryKey: queryKeys.watches.all,
-    queryFn: listWatches,
+    queryKey: monitoringKeys.watches(ownerId),
+    queryFn: ({ signal }) => listWatches(signal),
     enabled: paidPlan || pivotEnabled,
   });
 
   const existing = watchesQuery.data?.find((w) => w.session_id === sessionId);
 
   const createMutation = useMutation({
-    mutationFn: () => createWatch({ sessionId }),
+    mutationFn: () => createWatch({ sessionId }, scope.signal()),
     onSuccess: (watch) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.watches.all });
-      toast.success('Monitoring started — we’ll email you if anything breaks.');
+      if (scope.signal().aborted) return;
+      queryClient.invalidateQueries({ queryKey: monitoringKeys.watches(ownerId) });
+      toast.success('Monitoring started. Open the monitor to check coverage and alert status.');
       navigate(`/watch/${watch.id}`);
     },
-    onError: (error: Error) => toast.error(error.message),
+    onError: (error: Error) => { if (!scope.signal().aborted) toast.error(error.message); },
   });
 
   if ((paidPlan || pivotEnabled) && watchesQuery.isLoading) return null;
+  if ((paidPlan || pivotEnabled) && watchesQuery.isError) return <Card className="mt-6 p-4"><p role="alert">Monitoring status could not load. Retry before starting another monitor.</p><Button variant="outline" className="mt-3" disabled={watchesQuery.isFetching} onClick={() => void watchesQuery.refetch()}>Retry monitoring status</Button></Card>;
   if (pivotEnabled && !existing) return null;
 
   if (!pivotEnabled && !paidPlan) {
@@ -82,13 +91,13 @@ export function WatchPrompt({ sessionId, pivotEnabled = MCP_PIVOT_ENABLED }: { s
           <Activity className="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
           <div>
             <p className="text-sm font-medium text-foreground">
-              {existing ? (pivotEnabled ? 'Existing redirect monitor' : 'Monitoring is on') : 'Watch these redirects after you deploy'}
+              {existing ? (pivotEnabled ? 'Existing redirect monitor' : existing.status === 'active' ? 'Monitoring is on' : existing.status === 'ended' ? 'Monitoring ended' : 'Monitoring paused') : 'Watch these redirects after you deploy'}
             </p>
             <p className="mt-0.5 text-sm text-muted-foreground">
               {pivotEnabled
                 ? 'Open the monitor to inspect its current status and results.'
                 : existing
-                ? 'We check the live site and email you when something breaks.'
+                ? 'Open the monitor to inspect its current coverage, schedule and alert status.'
                 : 'We check the live site on a schedule and email you if a redirect 404s, lands on the wrong page, or never shipped.'}
             </p>
           </div>

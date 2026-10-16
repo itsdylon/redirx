@@ -1,8 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as XLSX from 'xlsx';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { MemoryRouter } from 'react-router-dom';
+import { UploadNotConfirmedError } from '../api/pipeline';
+import { appQueryClient } from '../queries/queryClient';
+import { queryKeys } from '../queries/queryKeys';
 
 // ---------------------------------------------------------------------------
 // Mocks — must come before importing the component
@@ -40,21 +44,14 @@ vi.mock('../api/gsc', async (importOriginal) => {
 });
 
 const mockUploadCSVs = vi.fn();
-vi.mock('../api/pipeline', () => ({
+vi.mock('../api/pipeline', async importOriginal => ({
+  ...await importOriginal<typeof import('../api/pipeline')>(),
   uploadCSVs: (...args: unknown[]) => mockUploadCSVs(...args),
   QuotaExceededError: class {},
 }));
 
-vi.mock('../contexts/AuthContext', () => ({
-  useAuth: () => ({
-    user: {
-      id: 'user-1',
-      email: 'test@example.com',
-      plan: 'agency',
-    },
-    loading: false,
-  }),
-}));
+const auth = vi.hoisted(() => ({ user: { id: 'user-1', email: 'test@example.com', plan: 'agency' } as { id: string; email: string; plan: string } | null }));
+vi.mock('../contexts/AuthContext', () => ({ useAuth: () => ({ ...auth, loading: false }) }));
 
 vi.mock('../contexts/OnboardingContext', () => ({
   useOnboarding: () => ({
@@ -97,6 +94,7 @@ vi.mock('./LoadingScreen', () => ({
 }));
 
 import { UploadPage } from './UploadPage';
+import * as validation from '../utils/validation';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -108,7 +106,7 @@ function Providers({ children }: { children: React.ReactNode }) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
-  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  return <MemoryRouter><QueryClientProvider client={client}>{children}</QueryClientProvider></MemoryRouter>;
 }
 
 /**
@@ -165,11 +163,7 @@ function uploadToZone(label: string, file: File) {
 function removeFromZone(label: string) {
   const labelEl = screen.getByText(label);
   const container = labelEl.closest('div')!;
-  const buttons = container.querySelectorAll('button[type="button"]');
-  const removeButton = buttons[buttons.length - 1] as HTMLButtonElement | undefined;
-  if (!removeButton) {
-    throw new Error(`Remove button not found for zone "${label}"`);
-  }
+  const removeButton = container.querySelector('button[aria-label^="Remove "]') as HTMLButtonElement;
   fireEvent.click(removeButton);
 }
 
@@ -179,6 +173,7 @@ function removeFromZone(label: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  auth.user = { id: 'user-1', email: 'test@example.com', plan: 'agency' };
   mockUploadCSVs.mockResolvedValue({ session_id: 'session-123', is_duplicate: false });
   // Default: Search Console available but not connected.
   mockGetGscStatus.mockResolvedValue({ success: true, connected: false, configured: true });
@@ -480,7 +475,7 @@ describe('UploadPage — API submission', () => {
     });
 
     expect(mockUploadCSVs).toHaveBeenCalledTimes(1);
-    expect(mockUploadCSVs).toHaveBeenNthCalledWith(1, expect.any(File), expect.any(File), false, 'content');
+    expect(mockUploadCSVs).toHaveBeenNthCalledWith(1, expect.any(File), expect.any(File), false, 'content', expect.any(AbortSignal));
 
     await user.click(screen.getByRole('button', { name: /Proceed Anyway/ }));
 
@@ -488,7 +483,7 @@ describe('UploadPage — API submission', () => {
       expect(mockUploadCSVs).toHaveBeenCalledTimes(2);
     });
 
-    expect(mockUploadCSVs).toHaveBeenNthCalledWith(2, expect.any(File), expect.any(File), true, 'content');
+    expect(mockUploadCSVs).toHaveBeenNthCalledWith(2, expect.any(File), expect.any(File), true, 'content', expect.any(AbortSignal));
 
     await waitFor(() => {
       expect(screen.getByTestId('loading-screen')).toHaveTextContent('new-run');
@@ -785,7 +780,7 @@ describe('UploadPage — traffic risk beat', () => {
 
   it('shows the risk number before matching, and defers submission until confirmed', async () => {
     const user = userEvent.setup();
-    // One page carries 900 of 1000 clicks: a single URL should account for 80%.
+    // One page carries 900 of 1000 clicks: a single URL exceeds the 80% recorded-click threshold.
     mockDiscoverSite
       .mockResolvedValueOnce(withTraffic('old.com', 4, [900, 50, 30, 20]))
       .mockResolvedValueOnce(withTraffic('new.com', 4, [0, 0, 0, 0]));
@@ -795,7 +790,7 @@ describe('UploadPage — traffic risk beat', () => {
     await user.click(screen.getByRole('button', { name: /Begin Quick Match/ }));
 
     await waitFor(() => {
-      expect(screen.getByText(/carry 80% of your organic clicks/)).toBeInTheDocument();
+      expect(screen.getByText('1 of 4 pages carry at least 80% of recorded organic clicks')).toBeInTheDocument();
     });
     // The job must not have been submitted yet — the beat comes first.
     expect(mockUploadCSVs).not.toHaveBeenCalled();
@@ -813,7 +808,7 @@ describe('UploadPage — traffic risk beat', () => {
     render(<UploadPage quickOnly />, { wrapper: Providers });
     await discoverBothSides(user);
     await user.click(screen.getByRole('button', { name: /Begin Quick Match/ }));
-    await waitFor(() => expect(screen.getByText(/carry 80%/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('1 of 3 pages carry at least 80% of recorded organic clicks')).toBeInTheDocument());
 
     await user.click(screen.getByRole('button', { name: 'Back to domains' }));
     await waitFor(() => {
@@ -835,6 +830,217 @@ describe('UploadPage — traffic risk beat', () => {
     await user.click(screen.getByRole('button', { name: /Begin Quick Match/ }));
 
     await waitFor(() => expect(mockUploadCSVs).toHaveBeenCalledTimes(1));
-    expect(screen.queryByText(/carry 80%/)).not.toBeInTheDocument();
+    expect(screen.queryByText('1 of 3 pages carry at least 80% of recorded organic clicks')).not.toBeInTheDocument();
+  });
+});
+
+
+describe('UploadPage — late file isolation', () => {
+  const valid = { valid: true, warnings: [], errors: [], rowCount: 2 };
+  it('keeps the latest selection when an older read finishes last', async () => {
+    let finish!: (value: typeof valid) => void;
+    const spy = vi.spyOn(validation, 'validateFile')
+      .mockReturnValueOnce(new Promise(resolve => { finish = resolve; }))
+      .mockResolvedValueOnce(valid);
+    try {
+      renderUploadPage();
+      uploadToZone('Old Site CSV', textFile('/a', 'slow.csv'));
+      uploadToZone('Old Site CSV', textFile('/b', 'latest.csv'));
+      await screen.findAllByText('latest.csv');
+      await act(async () => finish(valid));
+      expect(screen.queryByText('slow.csv')).not.toBeInTheDocument();
+      expect(screen.getAllByText('latest.csv').length).toBeGreaterThan(0);
+    } finally { spy.mockRestore(); }
+  });
+  it('ignores file validation after switching to domain discovery', async () => {
+    let finish!: (value: typeof valid) => void;
+    const spy = vi.spyOn(validation, 'validateFile').mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    try {
+      renderUploadPage();
+      uploadToZone('Old Site CSV', textFile('/a', 'late.csv'));
+      fireEvent.click(screen.getByRole('button', { name: /Paste domains instead/i }));
+      expect(spy.mock.calls[0][1]!.aborted).toBe(true);
+      await act(async () => finish(valid));
+      fireEvent.click(screen.getByRole('button', { name: 'Import a CSV or sitemap file' }));
+      expect(screen.queryByText('late.csv')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Begin/ })).toBeDisabled();
+    } finally { spy.mockRestore(); }
+  });
+});
+
+
+describe('UploadPage — owner lifecycle', () => {
+  it('clears selected files and rejects a previous owner pending file read', async () => {
+    let finish!: (result: any) => void;
+    const spy = vi.spyOn(validation, 'validateFile').mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    try {
+      const view = renderUploadPage();
+      uploadToZone('Old Site CSV', textFile('/private-a', 'owner-a.csv'));
+      auth.user = { id: 'user-2', email: 'b@example.com', plan: 'agency' };
+      view.rerender(<UploadPage />);
+      expect(spy.mock.calls[0][1]!.aborted).toBe(true);
+      await act(async () => finish({ valid: true, rowCount: 1, errors: [], warnings: [] }));
+      fireEvent.click(screen.getByRole('button', { name: 'Import a CSV or sitemap file' }));
+      expect(screen.queryByText('owner-a.csv')).toBeNull();
+      expect(screen.getByRole('button', { name: /Begin Deep Match/ })).toBeDisabled();
+    } finally { spy.mockRestore(); }
+  });
+  it.each(['resolve', 'reject'])('ignores a previous owner upload %s', async outcome => {
+    let finish!: (value: any) => void;
+    mockUploadCSVs.mockImplementationOnce(() => new Promise((resolve, reject) => { finish = outcome === 'resolve' ? resolve : reject; }));
+    const view = renderUploadPage({ quickOnly: true });
+    uploadToZone('Old Site CSV', textFile('/a\n/a-two', 'old.csv'));
+    uploadToZone('New Site CSV', textFile('/b\n/b-two', 'new.csv'));
+    await waitFor(() => expect(screen.getByRole('button', { name: /Begin Quick Match/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: /Begin Quick Match/ }));
+    expect(screen.getByRole('button', { name: 'Stop waiting' })).toBeInTheDocument();
+    const uploadSignal = mockUploadCSVs.mock.calls[0][4] as AbortSignal;
+    expect(uploadSignal.aborted).toBe(false);
+    auth.user = { id: 'user-2', email: 'b@example.com', plan: 'agency' };
+    view.rerender(<UploadPage quickOnly />);
+    expect(uploadSignal.aborted).toBe(true);
+    await act(async () => finish(outcome === 'resolve' ? { session_id: 'private-a', is_duplicate: false } : new Error('private-a failure')));
+    expect(screen.queryByTestId('loading-screen')).toBeNull();
+    expect(screen.queryByText(/private-a/)).toBeNull();
+    expect(mockNavigate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Import a CSV or sitemap file' }));
+    expect(screen.queryByText('old.csv')).toBeNull();
+    expect(screen.getByRole('button', { name: /Begin Quick Match/ })).toBeDisabled();
+  });
+  it('removes the entire upload surface after sign-out', () => {
+    const view = renderUploadPage();
+    auth.user = null;
+    view.rerender(<UploadPage />);
+    expect(screen.queryByText('Old Site CSV')).toBeNull();
+  });
+});
+
+describe('UploadPage — pending checks', () => {
+  it('announces and cancels pending validation, ignoring even an uncancellable late result', async () => {
+    let finish!: (result: validation.FileValidationResult) => void;
+    const spy = vi.spyOn(validation, 'validateFile').mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    try {
+      renderUploadPage(); uploadToZone('Old Site CSV', textFile('/a', 'pending.csv'));
+      expect(screen.getByRole('status')).toHaveTextContent('Checking pending.csv');
+      const signal = spy.mock.calls[0][1]!; expect(signal.aborted).toBe(false);
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel checking pending.csv' }));
+      expect(signal.aborted).toBe(true); expect(screen.queryByRole('status')).toBeNull();
+      await act(async () => finish({ valid: true, rowCount: 1, errors: [], warnings: [] }));
+      expect(screen.queryByText('pending.csv')).toBeNull(); expect(screen.getByRole('button', { name: /Begin/ })).toBeDisabled();
+    } finally { spy.mockRestore(); }
+  });
+  it('aborts a superseded read and keeps the replacement status until its own completion', async () => {
+    let oldFinish!: (result: validation.FileValidationResult) => void;
+    let latestFinish!: (result: validation.FileValidationResult) => void;
+    const spy = vi.spyOn(validation, 'validateFile')
+      .mockReturnValueOnce(new Promise(resolve => { oldFinish = resolve; }))
+      .mockReturnValueOnce(new Promise(resolve => { latestFinish = resolve; }));
+    try {
+      renderUploadPage(); uploadToZone('Old Site CSV', textFile('/old', 'old.csv'));
+      uploadToZone('Old Site CSV', textFile('/new', 'new.csv'));
+      expect(spy.mock.calls[0][1]!.aborted).toBe(true); expect(spy.mock.calls[1][1]!.aborted).toBe(false);
+      await act(async () => oldFinish({ valid: false, rowCount: 0, errors: ['Obsolete error'], warnings: [] }));
+      expect(screen.getByRole('status')).toHaveTextContent('Checking new.csv'); expect(screen.queryByText('Obsolete error')).toBeNull();
+      await act(async () => latestFinish({ valid: true, rowCount: 1, errors: [], warnings: [] }));
+      expect(screen.queryByRole('status')).toBeNull(); expect(screen.getAllByText('new.csv').length).toBeGreaterThan(0);
+    } finally { spy.mockRestore(); }
+  });
+  it('shows a recoverable error when validation unexpectedly rejects', async () => {
+    const spy = vi.spyOn(validation, 'validateFile').mockRejectedValueOnce(new Error('private parser internals'));
+    try {
+      renderUploadPage(); uploadToZone('Old Site CSV', textFile('/a', 'broken.csv'));
+      expect(await screen.findByText('Could not read this file. Choose it again or export a new copy.')).toBeInTheDocument();
+      expect(screen.queryByRole('status')).toBeNull(); expect(screen.queryByText('private parser internals')).toBeNull();
+    } finally { spy.mockRestore(); }
+  });
+});
+
+ it('aborts pending file validation on unmount', () => {
+  const spy = vi.spyOn(validation, 'validateFile').mockReturnValueOnce(new Promise(() => {}));
+  try {
+    const view = renderUploadPage(); uploadToZone('Old Site CSV', textFile('/a', 'unmount.csv'));
+    const signal = spy.mock.calls[0][1]!; expect(signal.aborted).toBe(false);
+    view.unmount(); expect(signal.aborted).toBe(true);
+  } finally { spy.mockRestore(); }
+});
+
+
+describe('UploadPage — uncertain upload recovery', () => {
+  it.each(['resolve', 'reject'])('stops a held upload immediately and ignores its late %s', async outcome => {
+    let finish!: (value: unknown) => void;
+    mockUploadCSVs.mockImplementationOnce(() => new Promise((resolve, reject) => { finish = outcome === 'resolve' ? resolve : reject; }));
+    const own = queryKeys.sessions.page('user-1', '', null, 50);
+    const other = queryKeys.sessions.page('user-2', '', null, 50);
+    appQueryClient.setQueryData(own, { sessions: [] });
+    appQueryClient.setQueryData(other, { sessions: [] });
+    try {
+      renderUploadPage({ quickOnly: true });
+      uploadToZone('Old Site CSV', textFile('/a\n/a-two', 'old.csv'));
+      uploadToZone('New Site CSV', textFile('/b\n/b-two', 'new.csv'));
+      await waitFor(() => expect(screen.getByRole('button', { name: /Begin Quick Match/ })).toBeEnabled());
+      fireEvent.click(screen.getByRole('button', { name: /Begin Quick Match/ }));
+      expect(screen.getByRole('status')).toHaveTextContent('does not cancel a job');
+      expect(screen.queryByTestId('loading-screen')).toBeNull();
+      const signal = mockUploadCSVs.mock.calls[0][4] as AbortSignal;
+      fireEvent.click(screen.getByRole('button', { name: 'Stop waiting' }));
+      expect(signal.aborted).toBe(true);
+      expect(screen.getByRole('alert')).toHaveTextContent('The upload was not confirmed.');
+      expect(screen.getByRole('button', { name: 'Remove old.csv' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Remove new.csv' })).toBeInTheDocument();
+      expect(appQueryClient.getQueryState(own)?.isInvalidated).toBe(true);
+      expect(appQueryClient.getQueryState(other)?.isInvalidated).toBe(false);
+      await act(async () => finish(outcome === 'resolve' ? { session_id: 'late-session', is_duplicate: false } : new Error('late private failure')));
+      expect(screen.getByRole('alert')).toHaveTextContent('The upload was not confirmed.');
+      expect(screen.queryByTestId('loading-screen')).toBeNull();
+      expect(mockNavigate).not.toHaveBeenCalled();
+      expect(mockUploadCSVs).toHaveBeenCalledTimes(1);
+    } finally { appQueryClient.clear(); }
+  });
+
+  it('keeps a newer explicit attempt active when an abandoned attempt settles', async () => {
+    let finishOld!: (value: unknown) => void;
+    mockUploadCSVs.mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve; }));
+    mockUploadCSVs.mockImplementationOnce(() => new Promise(() => {}));
+    const view = renderUploadPage({ quickOnly: true });
+    uploadToZone('Old Site CSV', textFile('/a\n/a-two', 'old.csv'));
+    uploadToZone('New Site CSV', textFile('/b\n/b-two', 'new.csv'));
+    await waitFor(() => expect(screen.getByRole('button', { name: /Begin Quick Match/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: /Begin Quick Match/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Stop waiting' }));
+    fireEvent.click(screen.getByRole('button', { name: /Begin Quick Match/ }));
+    const newSignal = mockUploadCSVs.mock.calls[1][4] as AbortSignal;
+    await act(async () => finishOld({ session_id: 'late-old-session', is_duplicate: false }));
+    expect(screen.getByRole('heading', { name: 'Waiting for upload confirmation' })).toBeInTheDocument();
+    expect(newSignal.aborted).toBe(false);
+    expect(screen.queryByTestId('loading-screen')).toBeNull();
+    view.unmount();
+    expect(newSignal.aborted).toBe(true);
+    expect(mockUploadCSVs).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the files and invalidates only this owner history before readback', async () => {
+    const own = queryKeys.sessions.page('user-1', '', null, 50);
+    const other = queryKeys.sessions.page('user-2', '', null, 50);
+    const dashboard = queryKeys.dashboard.forOwner('user-1');
+    appQueryClient.setQueryData(own, { sessions: [] });
+    appQueryClient.setQueryData(other, { sessions: [] });
+    appQueryClient.setQueryData(dashboard, { total_projects: 0 });
+    mockUploadCSVs.mockRejectedValueOnce(new UploadNotConfirmedError());
+    try {
+      renderUploadPage({ quickOnly: true });
+      uploadToZone('Old Site CSV', textFile('/a\n/a-two', 'old.csv'));
+      uploadToZone('New Site CSV', textFile('/b\n/b-two', 'new.csv'));
+      await waitFor(() => expect(screen.getByRole('button', { name: /Begin Quick Match/ })).toBeEnabled());
+      fireEvent.click(screen.getByRole('button', { name: /Begin Quick Match/ }));
+      expect(await screen.findByRole('alert')).toHaveTextContent('The upload was not confirmed.');
+      expect(screen.getByRole('link', { name: 'Check Project History' })).toHaveAttribute('href', '/projects');
+      expect(screen.getByRole('button', { name: 'Remove old.csv' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Remove new.csv' })).toBeInTheDocument();
+      expect(screen.queryByTestId('loading-screen')).toBeNull();
+      expect(appQueryClient.getQueryState(own)?.isInvalidated).toBe(true);
+      expect(appQueryClient.getQueryState(dashboard)?.isInvalidated).toBe(true);
+      expect(appQueryClient.getQueryState(other)?.isInvalidated).toBe(false);
+      expect(mockUploadCSVs).toHaveBeenCalledTimes(1);
+    } finally { appQueryClient.clear(); }
   });
 });

@@ -1,4 +1,4 @@
-import { ReactNode, useState } from 'react';
+import { ReactNode, useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { CircleUserRound, Menu } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
@@ -41,6 +41,7 @@ export function ToolLayout({ title, children }: ToolLayoutProps) {
   const navigate = useNavigate();
   const { user, logout } = useAuth();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  useEffect(() => { setMobileNavOpen(false); }, [user?.id, location.pathname]);
   const agencyUser = isAgencyPlan(user?.plan);
   const hasSourceSessionId = new URLSearchParams(location.search).has('source_session_id');
   const isQuickMatchActive =
@@ -78,7 +79,7 @@ export function ToolLayout({ title, children }: ToolLayoutProps) {
       <header className="sticky top-0 z-30 border-b border-border bg-background/95 backdrop-blur">
         <div className="mx-auto w-full max-w-6xl px-6">
           <div className="flex items-center justify-between py-3">
-            <div className="flex items-center gap-3">
+            <div className="flex min-w-0 items-center gap-3">
               <a
                 href="https://redirx.dev"
                 target="_blank"
@@ -87,10 +88,10 @@ export function ToolLayout({ title, children }: ToolLayoutProps) {
               >
                 RedirX
               </a>
-              <span className="text-sm text-muted-foreground">{title}</span>
+              <span className="min-w-0 break-words text-sm text-muted-foreground">{title}</span>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex shrink-0 items-center gap-2">
               {user ? (
                 <>
                   <nav aria-label="Primary" className="hidden items-center gap-1 md:flex">
@@ -138,6 +139,8 @@ export function ToolLayout({ title, children }: ToolLayoutProps) {
                         <div className="truncate text-sm text-foreground">{user.email}</div>
                       </DropdownMenuLabel>
                       <DropdownMenuSeparator />
+                      {MCP_PIVOT_ENABLED && <DropdownMenuItem onClick={() => navigate('/account')}>Account</DropdownMenuItem>}
+                      {MCP_PIVOT_ENABLED && <DropdownMenuItem onClick={() => navigate('/settings')}>Settings</DropdownMenuItem>}
                       <DropdownMenuItem onClick={handleLogout}>Logout</DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
@@ -206,13 +209,13 @@ export function ToolLayout({ title, children }: ToolLayoutProps) {
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => navigate('/login?redirect=%2Fquick-match&source=quick-match')}
+                    onClick={() => navigate(MCP_PIVOT_ENABLED ? '/login?redirect=%2Fcompanion' : '/login?redirect=%2Fquick-match&source=quick-match')}
                   >
                     Log in
                   </Button>
                   <Button
                     size="sm"
-                    onClick={() => navigate('/signup?redirect=%2Fquick-match&source=quick-match')}
+                    onClick={() => navigate(MCP_PIVOT_ENABLED ? '/signup?redirect=%2Fcompanion' : '/signup?redirect=%2Fquick-match&source=quick-match')}
                   >
                     Sign up
                   </Button>

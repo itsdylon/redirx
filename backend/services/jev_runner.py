@@ -6,9 +6,29 @@ import hashlib
 import math
 from uuid import UUID
 
+from src.redirx.embedding_response import decode_embedding_response
 from src.redirx.jev.jev import JevClient, ProviderUnavailable, MODEL, PROMPT_VERSION, encoded
 from .jev_database_transport import database_read
 from .jev_store import DurableStore
+
+
+EMBEDDING_MODEL = 'text-embedding-3-small'
+EMBEDDING_DIMENSIONS = 1536
+
+
+def _validated_embedding(vector):
+    """A JSON vector must survive the actual float32 retrieval representation."""
+    import numpy as np
+    if (not isinstance(vector, list) or len(vector) != EMBEDDING_DIMENSIONS
+            or any(type(value) not in (int, float) for value in vector)):
+        raise ValueError('Invalid embedding shape or type')
+    # Provider values can be finite as Python doubles but overflow/vanish on
+    # conversion. Validate before successful settlement or memory publication.
+    with np.errstate(over='ignore', invalid='ignore', under='ignore'):
+        converted = np.asarray(vector, dtype=np.float32)
+    if not np.isfinite(converted).all() or not np.any(converted):
+        raise ValueError('Embedding must remain finite and nonzero in float32')
+    return converted
 
 
 class DurableEmbeddingCache:
@@ -23,34 +43,73 @@ class DurableEmbeddingCache:
 
     def embed(self, texts, batch=32):
         import numpy as np
-        keys = [hashlib.sha256(encoded({'model':'text-embedding-3-small','text':text})).hexdigest() for text in texts]
+        keys = [hashlib.sha256(encoded({'model':EMBEDDING_MODEL,'text':text})).hexdigest() for text in texts]
         absent=list(dict.fromkeys(key for key in keys if key not in self.memory))
-        for key,saved in self.store.cache_get_many(absent).items():
-            vector=saved.get('embedding')
-            if not isinstance(vector,list) or len(vector)!=1536 or not all(type(x) in (int,float) and math.isfinite(x) for x in vector):
-                raise ProviderUnavailable('embedding_cache_invalid')
-            self.memory[key]=vector
+        restored = {}
+        absent_set = set(absent)
+        try:
+            for key,saved in self.store.cache_get_many(absent).items():
+                if key not in absent_set:
+                    raise ValueError('Unexpected embedding cache key')
+                vector=saved.get('embedding')
+                _validated_embedding(vector)
+                restored[key]=vector
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            raise ProviderUnavailable('embedding_cache_invalid') from None
+        self.memory.update(restored)
         missing = list(dict((key,text) for key,text in zip(keys,texts) if key not in self.memory).items())
         for start in range(0,len(missing),batch):
             chunk = missing[start:start+batch]
             cost = max(1, math.ceil(sum(len(text.encode()) for _,text in chunk)*0.02))
             reservation=self.store.reserve(cost)
             try:
-                response = self.client.embeddings.create(model='text-embedding-3-small',input=[text for _,text in chunk])
-                if len(response.data) != len(chunk) or sorted(item.index for item in response.data) != list(range(len(chunk))): raise ValueError('Incomplete embedding batch')
+                raw_response = self.client.embeddings.with_raw_response.create(model=EMBEDDING_MODEL,input=[text for _,text in chunk])
+                response = decode_embedding_response(raw_response, dimensions=EMBEDDING_DIMENSIONS, allow_base64=True)
+                if (response.model != EMBEDDING_MODEL or not isinstance(response.data, list)
+                        or len(response.data) != len(chunk)
+                        or any(type(item.index) is not int for item in response.data)
+                        or sorted(item.index for item in response.data) != list(range(len(chunk)))):
+                    raise ValueError('Invalid embedding response identity')
                 entries=[]
                 for index, ((key,_), item) in enumerate(zip(chunk, sorted(response.data,key=lambda item:item.index))):
                     vector = item.embedding
-                    if len(vector) != 1536 or not all(math.isfinite(x) for x in vector): raise ValueError('Invalid embedding')
+                    _validated_embedding(vector)
                     entries.append({'key':key,'response':{'embedding':vector}})
+                prompt_tokens=response.usage.prompt_tokens
                 tokens=response.usage.total_tokens
-                if type(tokens) is not int or tokens<0: raise ValueError('Invalid embedding usage')
+                if (type(prompt_tokens) is not int or prompt_tokens < 1
+                        or type(tokens) is not int or tokens < prompt_tokens):
+                    raise ValueError('Invalid embedding usage')
                 self.store.cache_put_many(entries,reservation,math.ceil(tokens*0.02))
                 self.memory.update({entry['key']:entry['response']['embedding'] for entry in entries})
             except Exception:
                 raise ProviderUnavailable('embedding_unavailable') from None
-        mat = np.array([self.memory[key] for key in keys],dtype=np.float32)
-        return mat / np.maximum(np.linalg.norm(mat,axis=1,keepdims=True),1e-9)
+        with np.errstate(over='ignore', invalid='ignore', under='ignore'):
+            mat = np.array([self.memory[key] for key in keys],dtype=np.float32)
+        # Reuse this existing raw float32 conversion, before normalization.
+        # Independent read-only rows avoid repeating Python-list conversion on
+        # primed queries without retaining a whole batch through a row view.
+        for key, row in zip(keys, mat):
+            if isinstance(self.memory[key], list) and np.all(np.isfinite(row)):
+                vector = row.copy()
+                vector.flags.writeable = False
+                self.memory[key] = vector
+        # Keep ordinary vectors bit-for-bit on the original float32 path.
+        # Extreme but representable nonzero rows need float64 norms: float32
+        # squares can overflow or underflow despite every component being valid.
+        with np.errstate(over='ignore', invalid='ignore', under='ignore'):
+            norms = np.linalg.norm(mat,axis=1,keepdims=True)
+            ordinary = np.isfinite(norms[:,0]) & (norms[:,0] >= 1e-9)
+            if ordinary.all():
+                # The common path needs no row-index copies or extra output
+                # allocation; retain the original float32 expression exactly.
+                return mat / np.maximum(norms,1e-9)
+            result = np.empty_like(mat)
+            result[ordinary] = mat[ordinary] / np.maximum(norms[ordinary],1e-9)
+            if not ordinary.all():
+                extreme = mat[~ordinary].astype(np.float64)
+                result[~ordinary] = (extreme / np.linalg.norm(extreme,axis=1,keepdims=True)).astype(np.float32)
+        return result
 
 
 class JevPipelineRunner:
@@ -87,10 +146,6 @@ class JevPipelineRunner:
         # Ground truth exists ONLY for explicit confirmations, never imported labels.
         seeds=[Page(site=site,url=row['old_url'],true_new_url=row['new_url']) for row in state['seeds']]
         progress(UUID(str(job['id'])),1,'Jev: prepare URL candidates',3)
-        retriever=Retriever(new,True,embedding_cache=self.embedding_factory(store))
-        retriever.prime_queries(old)
-        if seeds: retriever.calibrate(seeds)
-        bank=ExampleBank(seeds);provider=self.provider_factory(store)
         rows=[]
         for offset in range(0,limits['old_pages'],500):
             page=database_read(lambda:self.client.table('jev_proposals').select('old_url,pass').eq('run_id',site).order('old_url_hash').range(offset,offset+499).execute().data)
@@ -98,6 +153,17 @@ class JevPipelineRunner:
             if len(page)<500: break
         done={row['old_url'] for row in rows if row['pass']==state['pass']}
         confirmed={row['old_url'] for row in state['seeds']}
+        pending=[page for page in old if page.url not in done and page.url not in confirmed]
+        if not pending:
+            # Preparation above still fences this attempt and records audited
+            # confirmations. Existing proposals remain suggestions for review.
+            progress(UUID(str(job['id'])),2,'Jev: no pending URL proposals',3)
+            progress(UUID(str(job['id'])),3,'Jev: ready for explicit review',3)
+            return
+        retriever=Retriever(new,True,embedding_cache=self.embedding_factory(store))
+        retriever.prime_queries(old)
+        if seeds: retriever.calibrate(seeds)
+        bank=ExampleBank(seeds);provider=self.provider_factory(store)
         progress(UUID(str(job['id'])),2,'Jev: propose URL mappings',3)
         def map_one(page):
             examples=bank.nearest(page,3)
@@ -113,7 +179,6 @@ class JevPipelineRunner:
                       'model':MODEL,'prompt_version':PROMPT_VERSION,'confirmation_required':True}
             store.rpc('save_jev_proposal',p_pass=state['pass'],p_seed_revision=state['pass_seed_revision'],p_old_url=page.url,p_proposal=proposal)
         from concurrent.futures import ThreadPoolExecutor,wait,FIRST_COMPLETED
-        pending=[page for page in old if page.url not in done and page.url not in confirmed]
         # Shared read-only retrieval/embedding matrix, bounded six-page provider
         # concurrency. Global client pacing remains below the documented limit.
         with ThreadPoolExecutor(max_workers=6,thread_name_prefix='jev-page') as pool:

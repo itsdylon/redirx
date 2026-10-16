@@ -391,7 +391,7 @@ class TestFixRows(unittest.TestCase):
 
         svc = self._svc([self._issue("https://old.com/a", "https://new.com/b", 10)])
         content = redirect_export.build_export(svc.fix_rows(WATCH_ID), "nginx")
-        self.assertIn("/a /b;", content)
+        self.assertIn('location = "/a" { return 301 "https://new.com/b"; }', content)
         self.assertTrue(content.strip().endswith("}"))
 
 

@@ -25,12 +25,12 @@ export function DashboardLayout({ title, children }: DashboardLayoutProps) {
   return (
     <div className="flex h-screen">
       <Sidebar onLogout={handleLogout} />
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="min-w-0 flex-1 flex flex-col overflow-hidden">
         <TopBar
           title={title}
           onCreateJob={() => navigate(createJobPath)}
         />
-        <main className="flex-1 flex flex-col overflow-auto p-8 bg-muted/20">
+        <main className="flex-1 flex flex-col overflow-auto p-4 md:p-8 bg-muted/20">
           {children}
         </main>
         <OnboardingChecklistDock />

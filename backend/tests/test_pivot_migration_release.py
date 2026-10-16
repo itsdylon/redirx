@@ -9,7 +9,8 @@ from uuid import uuid4
 
 import psycopg
 from psycopg import sql
-from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from psycopg.conninfo import make_conninfo
+from backend.tests.helpers.disposable_postgres import validate_disposable_postgres_dsn
 
 from scripts.release.apply_pivot_migrations import ROOT, apply_one, apply_packet, history_state, load_packet, plan_progress, source_body
 from scripts.release.fingerprint_existing_data import fingerprint_tables, mismatched_tables
@@ -34,9 +35,7 @@ class AtomicMigrationHistory(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.admin_dsn = os.environ["PREFLIGHT_TEST_DATABASE_URL"]
-        info = conninfo_to_dict(cls.admin_dsn)
-        if info.get("host") not in ("127.0.0.1", "localhost", "::1") or info.get("hostaddr") or info.get("service"):
-            raise ValueError("Only a direct loopback fixture connection is accepted")
+        validate_disposable_postgres_dsn(cls.admin_dsn)
         cls.database = "redirx_release_test_" + uuid4().hex
         with psycopg.connect(cls.admin_dsn, autocommit=True) as conn:
             conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(cls.database)))

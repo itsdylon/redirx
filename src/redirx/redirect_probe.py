@@ -5,8 +5,8 @@ Export time is a prediction; this is the measurement. Redirects are followed
 one hop at a time rather than by aiohttp's `allow_redirects`, because the
 things that go wrong post-cutover are visible only in the shape of the chain:
 
-  - how many hops (each one leaks a little PageRank and a lot of latency)
-  - whether they were 301/308 or 302/307 (only permanent ones pass equity)
+  - how many hops (extra redirects add latency and complicate crawling)
+  - whether they were permanent (301/308) or temporary (302/307)
   - where it actually landed, versus where the approved mapping said
 
 Every hop is re-validated against the SSRF rules. A redirect is attacker-
@@ -20,9 +20,10 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import Optional
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import aiohttp
+from yarl import URL
 
 import logging
 
@@ -45,6 +46,29 @@ REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 # Statuses that mean "this server dislikes HEAD", not "this URL is broken".
 # Retrying them with GET avoids reporting a site-wide outage that isn't real.
 HEAD_UNSUPPORTED = frozenset({400, 403, 405, 406, 501})
+
+REQUEST_URL_REWRITTEN = "request_url_rewritten"
+REQUEST_URL_REWRITTEN_DETAIL = (
+    "Not verified: the HTTP client changes this URL's path or query spelling. "
+    "Check the exact URL with a tool that preserves the request target."
+)
+
+
+def request_target_preserved(url: str) -> bool:
+    """Whether the installed HTTP client's path/query matches the raw input.
+
+    This is not an SSRF check. Fragments are intentionally not sent over HTTP.
+    Do not claim exact observations when yarl normalizes escapes, dot segments,
+    Unicode or an explicitly empty query delimiter before sending the request.
+    """
+    try:
+        parsed = urlsplit(url)
+        raw = parsed.path or "/"
+        if "?" in url.split("#", 1)[0]:
+            raw += "?" + parsed.query
+        return URL(url).raw_path_qs == raw
+    except (ValueError, TypeError, UnicodeError):
+        return False
 
 
 # --- issue taxonomy --------------------------------------------------------
@@ -85,7 +109,7 @@ DESCRIPTIONS = {
     WRONG_TARGET: "Redirects somewhere other than the approved target",
     REDIRECT_LOOP: "Redirect loop — the browser gives up",
     REDIRECT_CHAIN: "Reaches the right page, but through extra hops",
-    TEMPORARY_REDIRECT: "Uses a temporary redirect — no ranking is passed on",
+    TEMPORARY_REDIRECT: "Uses a temporary redirect — use 301 or 308 for a permanent move",
     UNREACHABLE: "Could not be reached",
     BLOCKED: "Refused the request",
 }
@@ -116,7 +140,7 @@ class ProbeResult:
 
     @property
     def all_permanent(self) -> bool:
-        """True when every redirect in the chain passed ranking signals on."""
+        """True when every redirect has a permanent-move HTTP status."""
         return all(h.status in PERMANENT_STATUSES for h in self.hops)
 
 
@@ -131,13 +155,23 @@ def normalize_for_compare(url: str) -> str:
     path is not, and is preserved.
     """
     try:
-        parsed = urlparse(url)
+        parsed = urlsplit(url)
+        port = parsed.port
     except ValueError:
-        return url.strip().lower()
+        return ""
 
     host = (parsed.hostname or "").lower()
     if host.startswith("www."):
         host = host[4:]
+    if ":" in host:
+        host = f"[{host}]"
+    # Scheme upgrades remain equivalent, including explicit standard ports.
+    # A distinct nondefault service port still identifies a different target.
+    if port is not None and not (
+        (parsed.scheme.lower() == "http" and port == 80)
+        or (parsed.scheme.lower() == "https" and port == 443)
+    ):
+        host += f":{port}"
 
     path = parsed.path or "/"
     # /page and /page/ are the same page to every CMS in the ladder, and
@@ -146,13 +180,22 @@ def normalize_for_compare(url: str) -> str:
     if len(path) > 1:
         path = path.rstrip("/") or "/"
 
-    return urlunparse(("", host, path, "", parsed.query or "", ""))
+    return _with_empty_query(url, urlunsplit(("", host, path, parsed.query, "")))
+
+
+def _with_empty_query(original: str, normalized: str) -> str:
+    """Keep an explicit query delimiter distinct from an absent query."""
+    before_fragment = original.split("#", 1)[0]
+    if "?" in before_fragment and before_fragment.split("?", 1)[1] == "":
+        return normalized + "?"
+    return normalized
 
 
 def same_target(a: str, b: str) -> bool:
     if not a or not b:
         return False
-    return normalize_for_compare(a) == normalize_for_compare(b)
+    normalized = normalize_for_compare(a)
+    return bool(normalized) and normalized == normalize_for_compare(b)
 
 
 def visit_identity(url: str) -> str:
@@ -170,20 +213,22 @@ def visit_identity(url: str) -> str:
     still caught, on the hop that actually repeats a request.
     """
     try:
-        parsed = urlparse(url)
+        parsed = urlsplit(url)
+        port = parsed.port
     except ValueError:
         return url.strip()
 
     scheme = (parsed.scheme or "").lower()
     host = (parsed.hostname or "").lower()
-    port = parsed.port
+    if ":" in host:
+        host = f"[{host}]"
     if port is not None and (
         (scheme == "https" and port == 443) or (scheme == "http" and port == 80)
     ):
         port = None
-    netloc = f"{host}:{port}" if port else host
+    netloc = f"{host}:{port}" if port is not None else host
 
-    return urlunparse((scheme, netloc, parsed.path or "/", "", parsed.query or "", ""))
+    return _with_empty_query(url, urlunsplit((scheme, netloc, parsed.path or "/", parsed.query, "")))
 
 
 async def _request(
@@ -214,9 +259,21 @@ async def probe(session: aiohttp.ClientSession, url: str) -> ProbeResult:
 
     for _ in range(MAX_HOPS + 1):
         try:
+            # urllib validates some authority errors lazily on .port access.
+            # Keep those failures inside the probe's bounded-result contract.
+            _ = urlsplit(current).port
             validate_public_url(current)
+        except (ValueError, TypeError):
+            result.error = "invalid_url"
+            result.final_url = current
+            return result
         except SSRFBlockedError:
             result.error = "blocked"
+            result.final_url = current
+            return result
+
+        if not request_target_preserved(current):
+            result.error = REQUEST_URL_REWRITTEN
             result.final_url = current
             return result
 
@@ -283,7 +340,21 @@ async def probe(session: aiohttp.ClientSession, url: str) -> ProbeResult:
 
         result.hops.append(Hop(url=current, status=status, location=location))
         # Location is allowed to be relative, and often is.
-        nxt = urljoin(current, location)
+        try:
+            nxt = urljoin(current, location)
+        except (ValueError, TypeError):
+            result.error = "invalid_url"
+            result.final_url = current
+            return result
+        # Older Python urljoin versions discard an explicitly empty query.
+        # Retain it so the fidelity guard can refuse the unrepresentable hop.
+        before_fragment = location.split("#", 1)[0]
+        if "?" in before_fragment and before_fragment.split("?", 1)[1] == "":
+            parsed_next = urlsplit(nxt)
+            nxt = urlunsplit((parsed_next.scheme, parsed_next.netloc,
+                             parsed_next.path, "", "")) + "?"
+            if parsed_next.fragment:
+                nxt += "#" + parsed_next.fragment
 
         key = visit_identity(nxt)
         if key in seen:
@@ -316,8 +387,14 @@ def classify(result: ProbeResult, expected_url: Optional[str]) -> Optional[tuple
         return UNREACHABLE, "Host is rate-limiting or refusing automated requests"
     if result.error == "timeout":
         return UNREACHABLE, f"No response within {HOP_TIMEOUT}s"
+    if result.error == REQUEST_URL_REWRITTEN:
+        return UNREACHABLE, REQUEST_URL_REWRITTEN_DETAIL
+    if result.error == "invalid_url":
+        return UNREACHABLE, "Not verified: the URL or redirect Location has an invalid authority or port. Correct the URL and retry."
     if result.error:
         return UNREACHABLE, "Connection failed"
+    if expected_url and not request_target_preserved(expected_url):
+        return UNREACHABLE, REQUEST_URL_REWRITTEN_DETAIL
 
     status = result.final_status or 0
 
@@ -346,7 +423,7 @@ def classify(result: ProbeResult, expected_url: Optional[str]) -> Optional[tuple
         temporary = next(
             (h.status for h in result.hops if h.status not in PERMANENT_STATUSES), 302
         )
-        return TEMPORARY_REDIRECT, f"Uses {temporary}, not 301"
+        return TEMPORARY_REDIRECT, f"Uses {temporary}; use 301 or 308 for a permanent move"
 
     if len(result.hops) > 1:
         return REDIRECT_CHAIN, f"{len(result.hops)} hops before landing"

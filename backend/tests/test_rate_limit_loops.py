@@ -32,6 +32,7 @@ import time
 import unittest
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+from backend.tests.helpers.disposable_postgres import validate_disposable_postgres_dsn
 from uuid import uuid4
 from unittest.mock import patch
 
@@ -60,9 +61,8 @@ class LimiterPoolOwnership(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.admin_dsn = os.environ["PREFLIGHT_TEST_DATABASE_URL"]
+        validate_disposable_postgres_dsn(cls.admin_dsn)
         parsed = urlsplit(cls.admin_dsn)
-        if parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
-            raise RuntimeError("Acceptance requires a local disposable PostgreSQL instance.")
         cls.database = "redirx_preflight_test_" + uuid4().hex
         with psycopg.connect(cls.admin_dsn, autocommit=True) as conn:
             conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(cls.database)))

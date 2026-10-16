@@ -16,8 +16,13 @@ import re
 
 import psycopg
 from psycopg import sql
-from psycopg.conninfo import conninfo_to_dict
 from psycopg.pq import TransactionStatus
+
+if __package__:
+    from .connection_target import validate_release_target
+else:
+    from connection_target import validate_release_target
+
 
 ROOT = Path(__file__).resolve().parents[2]
 LOCK = (724319, 32)
@@ -176,12 +181,8 @@ def main():
     if args.dsn_file.stat().st_mode & 0o077:
         raise ValueError("Credential file must be private (0600)")
     dsn = args.dsn_file.read_text().strip()
-    supplied = conninfo_to_dict(dsn)
-    expected = json.loads(args.target_file.read_text())["connection_target"]
-    if set(expected) != {"host", "port", "user", "dbname"} or any(supplied.get(k) != v for k, v in expected.items()):
-        raise ValueError("Connection target differs from the reviewed preflight")
-    if supplied.get("hostaddr") or supplied.get("service"):
-        raise ValueError("Connection target override is not supported")
+    expected = json.loads(args.target_file.read_text())['connection_target']
+    validate_release_target(dsn, expected)
     if args.apply and not args.journal:
         raise ValueError("Apply requires a new journal file")
     journal = None

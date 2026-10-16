@@ -306,13 +306,13 @@ class PostgreSQLTests(TestCase):
         app.register_blueprint(gsc_blueprint, url_prefix='/api/gsc')
         with patch('backend.routes.gsc_routes.GSCService') as legacy, \
                 patch('backend.routes.migration_gsc_routes.MigrationGSCService') as agent:
-            legacy.return_value.handle_callback.return_value = {'return_to':'/review/legacy'}
+            legacy.return_value.handle_callback.return_value = {'return_to':'/review/legacy','consent_result':'connected'}
             for flag,state in [('true','signed.legacy.jwt'),('false','a'*43)]:
                 with patch.dict(os.environ, {'MCP_PIVOT_ENABLED':flag}):
                     response=app.test_client().get('/api/gsc/callback',query_string={'state':state,'code':'fixture-code'})
                 self.assertEqual(response.status_code,302)
                 self.assertTrue(response.headers['Location'].endswith('/review/legacy?gsc=connected'))
-                legacy.return_value.handle_callback.assert_called_with('fixture-code',state)
+                legacy.return_value.handle_callback.assert_called_with('fixture-code',state,None)
             agent.assert_not_called()
 
     def test_rls_and_rpc_privileges_and_account_cleanup(self):

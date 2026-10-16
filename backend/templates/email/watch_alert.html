@@ -3,11 +3,7 @@
 {% block title %}Redirect problems found on {{ domain }}{% endblock %}
 
 {% block content %}
-{#
-  The lead number is clicks, not URL count. "9 redirects are broken" is a
-  support ticket; "9 redirects are broken and they carried 4,300 clicks a
-  month" is a decision about what to do this afternoon.
-#}
+{# Recorded baseline traffic prioritizes findings; it is not measured loss. #}
 <table role="presentation" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
   <tr>
     <td width="48" height="48" style="width:48px;height:48px;border-radius:24px;background-color:#fef2f2;text-align:center;vertical-align:middle;font-size:26px;line-height:48px;color:#dc2626;">!</td>
@@ -20,7 +16,7 @@
 <p style="margin:0 0 28px;font-size:15px;color:#52525b;line-height:1.6;">
   We checked the live redirects for <strong style="color:#18181b;">{{ project_name }}</strong>
   on <span style="font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;">{{ domain }}</span>
-  and found problems that weren't there when you exported.
+  and found the issues below. These observations do not establish when a problem started.
 </p>
 
 <!-- Headline numbers -->
@@ -33,7 +29,7 @@
           <td style="padding:16px 20px 12px;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
               <tr>
-                <td style="font-size:11px;color:#71717a;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;">Monthly Clicks At Risk</td>
+                <td style="font-size:11px;color:#71717a;font-weight:600;letter-spacing:0.3px;">Recorded Clicks on Affected Pages</td>
                 <td align="right" style="font-size:24px;color:#dc2626;font-weight:700;">{{ '{:,}'.format(clicks_at_risk) }}</td>
               </tr>
             </table>
@@ -95,19 +91,21 @@
 
 {% if total_issues > issues|length %}
 <p style="margin:0 0 24px;font-size:13px;color:#71717a;">
-  Showing the {{ issues|length }} highest-traffic problems of {{ total_issues }}.
+  Showing the {{ issues|length }} highest-recorded-traffic findings of {{ total_issues }}.
 </p>
 {% endif %}
 
 <table role="presentation" cellpadding="0" cellspacing="0" style="margin-bottom:28px;">
   <tr>
     <td style="border-radius:8px;background-color:#2DD4A4;">
-      <a href="{{ app_url }}/watch/{{ watch_id }}" style="display:inline-block;padding:14px 32px;color:#ffffff;font-size:15px;font-weight:600;text-decoration:none;">Review &amp; Fix &rarr;</a>
+      <a href="{{ app_url }}/watch/{{ watch_id }}" style="display:inline-block;padding:14px 32px;color:#052e24;font-size:15px;font-weight:600;text-decoration:none;">Review &amp; Fix &rarr;</a>
     </td>
   </tr>
 </table>
 
-<p style="margin:0;font-size:13px;color:#a1a1aa;line-height:1.5;">
-  We'll keep checking and only email you when something new breaks — not every time we look.
+<p style="margin:0;font-size:13px;color:#52525b;line-height:1.5;">
+  While this watch is active, repeated observations do not trigger another alert.
+  Check the watch page for its latest sweep and open findings. Exporting a fix does not install it;
+  only a later successful check can confirm recovery.
 </p>
 {% endblock %}

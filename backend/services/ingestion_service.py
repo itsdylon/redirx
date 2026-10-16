@@ -326,6 +326,7 @@ class IngestionService:
         capture_baseline: bool = True,
         source_session_id=None,
         gsc_property_override: Optional[str] = None,
+        use_gsc: bool = True,
     ) -> Dict[str, Any]:
         """
         Build the tagged URL set for one side of a migration.
@@ -335,12 +336,14 @@ class IngestionService:
         entirely — its URLs are not indexed yet, so GSC would return nothing
         and cost a round trip to learn it.
         """
+        if type(use_gsc) is not bool:
+            raise ValueError("use_gsc must be true or false")
         normalize_root(domain)  # raises DiscoveryError on bad input
         gsc_rows: List[Dict[str, Any]] = []
         gsc_property: Optional[str] = None
         baseline_id: Optional[str] = None
 
-        if side == "old":
+        if side == "old" and use_gsc:
             gsc_rows, gsc_property = await asyncio.to_thread(
                 self.gsc_urls_for_domain,
                 user_id,

@@ -40,6 +40,8 @@ vi.mock('react-router-dom', async (importOriginal) => {
   };
 });
 
+vi.mock('./ToolLayout', () => ({ ToolLayout: ({ children }: { children: React.ReactNode }) => <div data-testid="dashboard-layout">{children}</div> }));
+
 vi.mock('./DashboardLayout', () => ({
   DashboardLayout: ({ children, title }: { children: React.ReactNode; title: string }) => (
     <div data-testid="dashboard-layout" data-title={title}>{children}</div>
@@ -177,6 +179,16 @@ describe('Settings', () => {
     expect(mockToastSuccess).toHaveBeenCalledWith('Default settings saved successfully.');
   });
 
+  it('normalizes the legacy htaccess default to the actual apache exporter', async () => {
+    localStorage.setItem('redirx_default_export_format', 'htaccess');
+    localStorage.setItem('redirx_default_url_format', 'not-a-supported-format');
+    renderSettings('defaults');
+    expect(screen.getByLabelText('Default Export Format')).toHaveValue('apache');
+    expect(screen.getByLabelText('Default URL Format')).toHaveValue('paths');
+    await userEvent.click(screen.getByRole('button', { name: 'Save Defaults' }));
+    expect(localStorage.getItem('redirx_default_export_format')).toBe('apache');
+  });
+
   it('saves notification preferences', async () => {
     const user = userEvent.setup();
     renderSettings('notifications');
@@ -184,7 +196,7 @@ describe('Settings', () => {
     await user.click(await screen.findByRole('button', { name: 'Save Notification Preferences' }));
 
     await waitFor(() => {
-      expect(mockUpdateEmailPreference).toHaveBeenCalledTimes(2);
+      expect(mockUpdateEmailPreference).toHaveBeenCalledTimes(4);
     });
   });
 
@@ -209,4 +221,62 @@ describe('Settings', () => {
       expect(copy).not.toContain(legacyTerm);
     }
   });
+  it('does not overwrite unknown notification preferences after their read failed', async () => {
+    mockGetEmailPreferences.mockRejectedValueOnce(new Error('Preferences unavailable'));
+    renderSettings('notifications');
+    expect(await screen.findByRole('button', { name: 'Reload notification preferences' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save Notification Preferences' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('switch')).not.toBeInTheDocument();
+    expect(mockUpdateEmailPreference).not.toHaveBeenCalled();
+  });
+
+  it('does not claim payment success from a checkout return query parameter', async () => {
+    mockSearchParams.set('status', 'success');
+    renderSettings('subscription', true);
+    await screen.findByText('Legacy account plan');
+    expect(mockToastSuccess).not.toHaveBeenCalled();
+    expect(mockToastInfo).toHaveBeenCalledWith('Returned from checkout. Checking billing status; payment is not confirmed yet.');
+    expect(mockCreateAgencyCheckout).not.toHaveBeenCalled();
+  });
+
+  it('supports the historical billing tab alias and safely defaults unknown tabs', async () => {
+    renderSettings('billing', true);
+    expect(await screen.findByText('Legacy account plan')).toBeInTheDocument();
+  });
+
+  it('offers a safe retry when billing status is unavailable', async () => {
+    mockGetBillingStatus.mockRejectedValueOnce(new Error('Billing unavailable'));
+    renderSettings('subscription', true);
+    expect(await screen.findByRole('button', { name: 'Reload billing status' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Manage Billing' })).not.toBeInTheDocument();
+  });
+
+});
+
+
+it('loads and saves monitoring and legacy-tip opt-outs without activating pivot nudges', async () => {
+  mockGetEmailPreferences.mockResolvedValue([
+    { email_type: 'mapping_complete', opted_out: false },
+    { email_type: 'mapping_failed', opted_out: false },
+    { email_type: 'watch_alert', opted_out: true },
+    { email_type: 'onboard_nudge', opted_out: true },
+  ]);
+  renderSettings('notifications', true);
+  const watch = await screen.findByRole('switch', { name: 'Monitoring Alert Emails' });
+  const tips = screen.getByRole('switch', { name: 'Onboarding Tip Emails' });
+  expect(watch).not.toBeChecked();
+  expect(tips).not.toBeChecked();
+  expect(screen.getByText('Legacy onboarding tips are paused for the current workflow. Saving this preference does not activate them.')).toBeInTheDocument();
+  await userEvent.click(watch);
+  await userEvent.click(screen.getByRole('button', { name: 'Save Notification Preferences' }));
+  await waitFor(() => expect(mockUpdateEmailPreference).toHaveBeenCalledWith('watch_alert', false));
+  expect(mockUpdateEmailPreference).toHaveBeenCalledWith('onboard_nudge', true);
+});
+
+it('does not claim all preferences saved when one of four updates fails', async () => {
+  mockUpdateEmailPreference.mockImplementation((type: string) => type === 'watch_alert' ? Promise.reject(new Error('Watch preference unavailable')) : Promise.resolve());
+  renderSettings('notifications');
+  await userEvent.click(await screen.findByRole('button', { name: 'Save Notification Preferences' }));
+  await waitFor(() => expect(mockToastError).toHaveBeenCalledWith('Watch preference unavailable Some preferences may have saved; reload to check.'));
+  expect(mockToastSuccess).not.toHaveBeenCalled();
 });

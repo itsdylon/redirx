@@ -1,5 +1,5 @@
 import { API_BASE_URL, getAuthHeadersMultipart, getAuthHeaders } from './config';
-import { handleApiError } from '../utils/errorHandler';
+import { handleApiError, toApiError, throwApiErrorFromResponse } from '../utils/errorHandler';
 
 export interface ContentUrlCapError {
   type: 'content_url_cap_exceeded';
@@ -20,7 +20,15 @@ const CONTENT_CAP_REASON_CODES = new Set([
   'content_both_url_caps_exceeded',
 ]);
 
-export async function uploadCSVs(oldFile: File, newFile: File, force: boolean = false, pipelineType?: 'content' | 'url_only') {
+/** A POST may have committed even when its acknowledgment was lost or malformed. */
+export class UploadNotConfirmedError extends Error {
+  constructor() {
+    super('The upload was not confirmed. Check Project History for a new project before submitting these files again.');
+    this.name = 'UploadNotConfirmedError';
+  }
+}
+
+export async function uploadCSVs(oldFile: File, newFile: File, force: boolean = false, pipelineType?: 'content' | 'url_only', signal?: AbortSignal) {
   const formData = new FormData();
   formData.append("old_csv", oldFile);
   formData.append("new_csv", newFile);
@@ -36,10 +44,14 @@ export async function uploadCSVs(oldFile: File, newFile: File, force: boolean = 
       method: "POST",
       headers: getAuthHeadersMultipart(),
       body: formData,
+      signal,
     });
 
     if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
+      // A native Response body can only be consumed once. Keep the parsed
+      // payload for cap handling and the same structured error for other failures.
+      const apiError = await toApiError(response);
+      const data = apiError.payload ?? {};
 
       // Handle content URL cap exceeded (422) with structured payload
       if (response.status === 422 && CONTENT_CAP_REASON_CODES.has(String(data.reason_code || ''))) {
@@ -70,12 +82,22 @@ export async function uploadCSVs(oldFile: File, newFile: File, force: boolean = 
         throw error;
       }
 
-      // Use centralized error handler for other errors
-      const userError = await handleApiError(null, response);
-      throw new Error(userError.message);
+      throw apiError;
     }
 
-    return await response.json();
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      throw new UploadNotConfirmedError();
+    }
+    // These are the fields /api/process always acknowledges for new and duplicate
+    // sessions. Keep the opaque ID unchanged; never infer success from HTTP alone.
+    if (data?.success !== true || typeof data.session_id !== 'string' || !data.session_id.trim()
+        || typeof data.is_duplicate !== 'boolean') {
+      throw new UploadNotConfirmedError();
+    }
+    return data;
   } catch (error: any) {
     if (error.type === 'content_url_cap_exceeded') {
       throw error;
@@ -83,8 +105,7 @@ export async function uploadCSVs(oldFile: File, newFile: File, force: boolean = 
 
     // Handle network errors and other fetch failures
     if (error instanceof TypeError || error.name === 'AbortError') {
-      const userError = await handleApiError(error);
-      throw new Error(userError.message);
+      throw new UploadNotConfirmedError();
     }
 
     // Re-throw other errors (like Error objects from our own code)
@@ -124,32 +145,14 @@ export async function getAlternatives(sessionId: string, mappingId: string): Pro
   }
 }
 
-export async function getResults(sessionId: string) {
-  try {
-    const response = await fetch(
-      `${API_BASE_URL}/api/results/${sessionId}`,
-      {
-        method: "GET",
-        headers: getAuthHeaders()
-      }
-    );
-
-    if (!response.ok) {
-      const userError = await handleApiError(null, response);
-      throw new Error(userError.message);
-    }
-
-    return await response.json();
-  } catch (error: any) {
-    // Handle network errors and other fetch failures
-    if (error instanceof TypeError || error.name === 'AbortError') {
-      const userError = await handleApiError(error);
-      throw new Error(userError.message);
-    }
-
-    // Re-throw other errors
-    throw error;
-  }
+export async function getResults(sessionId: string, signal?: AbortSignal) {
+  const response = await fetch(`${API_BASE_URL}/api/results/${encodeURIComponent(sessionId)}`, {
+    headers: getAuthHeaders(), signal,
+  });
+  if (!response.ok) await throwApiErrorFromResponse(response, 'Unable to load review results.');
+  const data = await response.json();
+  if (data?.success !== true || !Array.isArray(data.mappings)) throw new Error('The server did not return valid review results.');
+  return data;
 }
 
 export interface DeepPreviewVisibleItem {
@@ -191,32 +194,19 @@ export interface DeepPreviewResponse {
   lock_overlay?: string;
 }
 
-export async function getDeepPreview(sessionId: string): Promise<DeepPreviewResponse> {
-  try {
-    const response = await fetch(
-      `${API_BASE_URL}/api/results/${sessionId}/deep-preview`,
-      {
-        method: "GET",
-        headers: getAuthHeaders()
-      }
-    );
-
-    if (!response.ok) {
-      const userError = await handleApiError(null, response);
-      throw new Error(userError.message);
-    }
-
-    return await response.json();
-  } catch (error: any) {
-    if (error instanceof TypeError || error.name === 'AbortError') {
-      const userError = await handleApiError(error);
-      throw new Error(userError.message);
-    }
-    throw error;
-  }
+export async function getDeepPreview(sessionId: string, signal?: AbortSignal): Promise<DeepPreviewResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/results/${encodeURIComponent(sessionId)}/deep-preview`, {
+    headers: getAuthHeaders(), signal,
+  });
+  if (!response.ok) await throwApiErrorFromResponse(response, 'Unable to load review results.');
+  const data = await response.json();
+  if (data?.success !== true) throw new Error('The server did not return valid review results.');
+  return data;
 }
 
 export interface ReviewDecision {
+  /** Exact saved target before changing a decision or target; null is unresolved. */
+  expected_new_url?: string | null;
   approved?: boolean;
   new_url?: string;
   match_type?: string;
@@ -230,24 +220,31 @@ export interface ReviewDecision {
  *
  * Review used to live only in React state, which made needs_review in the
  * database a fiction: the watch monitored the wrong rows and the v1 export
- * could disagree with the file the browser built. The UI still updates
- * optimistically — this write is what makes the decision survive the tab.
+ * could disagree with the file the browser built. The UI waits for acknowledgment before changing the exportable decision.
  */
 export async function persistReviewDecision(
   sessionId: string,
   mappingId: string,
   decision: ReviewDecision
 ): Promise<void> {
-  const response = await fetch(
-    `${API_BASE_URL}/api/results/${sessionId}/mappings/${mappingId}`,
-    {
-      method: 'PATCH',
-      headers: getAuthHeaders(),
-      body: JSON.stringify(decision),
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error('Save not confirmed after 20 seconds. Reload results to check the server state.')), 20000);
+  try {
+    const response = await fetch(
+      `${API_BASE_URL}/api/results/${encodeURIComponent(sessionId)}/mappings/${encodeURIComponent(mappingId)}`,
+      {
+        method: 'PATCH',
+        signal: controller.signal,
+        headers: getAuthHeaders(),
+        body: JSON.stringify(decision),
+      }
+    );
+    if (!response.ok) {
+      await throwApiErrorFromResponse(response, 'The review save was not confirmed.');
     }
-  );
-  if (!response.ok) {
-    const userError = await handleApiError(null, response);
-    throw new Error(userError.message);
+    const data = await response.json();
+    if (data?.success !== true) throw new Error('The server did not confirm the review save. Reload results before exporting.');
+  } finally {
+    clearTimeout(timer);
   }
 }

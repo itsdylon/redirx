@@ -1,7 +1,8 @@
+vi.mock('../../contexts/AuthContext', () => ({ useAuth: () => ({ user: { id: 'owner-fixture' } }) }));
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import { PivotCompanionPage } from '../PivotCompanionPage';
 import { PivotMigrationDetail } from '../PivotMigrationDetail';
@@ -9,6 +10,7 @@ import { SubscriptionCheckoutPanel } from '../SubscriptionCheckoutPanel';
 
 // Keep the actual screens, controls, request-scope hook, API and auth headers.
 // Only the unrelated authenticated navigation shell is replaced.
+vi.mock('../../contexts/AuthContext', () => ({ useAuth: () => ({ user: { id: 'fixture-owner' } }) }));
 vi.mock('../ToolLayout', () => ({ ToolLayout: ({ children }: { children: ReactNode }) => <>{children}</> }));
 const envelope = (data: unknown, changes: Record<string, unknown> = {}) => ({ contract_version: '1.0.0',
   migration_id: 'm1', operation_id: 'op1', status: 'succeeded', next_action: 'none', data, error: null, ...changes });
@@ -47,7 +49,7 @@ beforeEach(() => {
     requests.push(request); return Promise.resolve(handler(request));
   }));
 });
-afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); localStorage.clear(); vi.unstubAllGlobals(); });
 
 describe('companion history through its actual API', () => {
   it.each([401, 200])('shows an auth failure on HTTP%s without claiming empty history', async status => {
@@ -142,9 +144,10 @@ describe('migration decisions and payment', () => {
       return ordinary(r);
     };
     const user = userEvent.setup(); mountDetail();
-    await user.click(await screen.findByRole('button', { name: 'Approve', exact: true }));
+    await user.click(await screen.findByRole('button', { name: 'Approve' }));
     expect(await screen.findByLabelText('Destination for https://old.example/b')).toBeInTheDocument();
     expect(screen.queryByLabelText('Destination for https://old.example/a')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('Destination approved for https://old.example/a.')).toHaveFocus());
     expect(paths('/matches').every(r => r.url.pathname.includes('/runs/run1/'))).toBe(true);
     expect(paths('/matches', 'PATCH')[0].body.decisions).toEqual([{ mapping_id: 'a', expected_revision: 0, action: 'approve' }]);
     expect(paths('/api/v2/migrations/m1').filter(r => r.url.pathname === '/api/v2/migrations/m1')).toHaveLength(2);
@@ -161,7 +164,7 @@ describe('migration decisions and payment', () => {
     handler = r => r.init.method === 'PATCH'
       ? json(envelope({ outcomes: [{ code: 'revision_conflict', message: 'This mapping changed. Refresh before retrying.' }] }, { status: 'partial' })) : ordinary(r);
     const user = userEvent.setup(); mountDetail();
-    await user.click(await screen.findByRole('button', { name: 'Approve', exact: true }));
+    await user.click(await screen.findByRole('button', { name: 'Approve' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('This mapping changed');
     expect(screen.getByLabelText('Destination for https://old.example/a')).toBeInTheDocument();
     expect(paths('/matches').filter(r => !r.init.method)).toHaveLength(1);
@@ -219,7 +222,7 @@ describe('mapping visibility and filter pagination', () => {
     expect(screen.getByText('2 saved mappings loaded for this filter; more available.')).toBeInTheDocument();
     const unmatchedRow = screen.getByLabelText('Destination for https://old.example/unmatched').closest('li')!;
     expect(within(unmatchedRow).getByText(/No destination/)).toBeInTheDocument();
-    expect(within(unmatchedRow).getByRole('button', { name: 'Approve', exact: true })).toBeDisabled();
+    expect(within(unmatchedRow).getByRole('button', { name: 'Approve' })).toBeDisabled();
     expect(within(unmatchedRow).getByRole('button', { name: 'Defer' })).toBeEnabled();
     await user.click(screen.getByRole('button', { name: 'Load more mappings' }));
     await screen.findByLabelText('Destination for https://old.example/approved');
@@ -275,7 +278,7 @@ describe('Search Console and monitoring', () => {
       ? { properties: [{ site_url: 'sc-domain:old.example' }, { site_url: 'https://old.example/blog/' }] }
       : { summary: 'Historical traffic synced.' })) : ordinary(r);
     const user = userEvent.setup(); mountDetail();
-    expect(screen.getByRole('button', { name: 'Sync selected property' })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: 'Sync selected property' })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: 'Load properties' }));
     await user.selectOptions(await screen.findByLabelText('Search Console property'), 'https://old.example/blog/');
     await user.click(screen.getByRole('button', { name: 'Sync selected property' }));
@@ -367,10 +370,306 @@ describe('subscription consent and request cancellation', () => {
     let finish!: (response: Response) => void;
     handler = r => r.init.method === 'PATCH' ? new Promise(resolve => { finish = resolve; }) : ordinary(r);
     const user = userEvent.setup(); const view = mountDetail();
-    await user.click(await screen.findByRole('button', { name: 'Approve', exact: true }));
+    await user.click(await screen.findByRole('button', { name: 'Approve' }));
     const signal = paths('/matches', 'PATCH')[0].init.signal!;
     view.unmount(); expect(signal.aborted).toBe(true);
     await act(async () => { finish(json(envelope({ outcomes: [{ code: 'ok' }] }))); });
     expect(paths('/matches').filter(r => !r.init.method)).toHaveLength(1);
+  });
+});
+
+
+describe('review continuity and correction safety', () => {
+  it('reloads all opened pages with fresh cursors and revisions after a decision', async () => {
+    let saved = false;
+    handler = r => {
+      if (r.init.method === 'PATCH') { saved = true; return json(envelope({ outcomes: [{ code: 'ok' }] })); }
+      if (r.url.pathname.endsWith('/matches')) {
+        const more = r.url.searchParams.has('cursor');
+        return json(envelope({ items: [row(more ? 'b' : 'a', saved ? 7 : 2)], next_cursor: more ? null : saved ? 'fresh-cursor' : 'original-cursor' }));
+      }
+      return ordinary(r);
+    };
+    const user = userEvent.setup(); mountDetail();
+    await user.click(await screen.findByRole('button', { name: 'Load more mappings' }));
+    const second = (await screen.findByLabelText('Destination for https://old.example/b')).closest('li')!;
+    await user.click(within(second).getByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Approve' })[1]).toBeEnabled());
+    expect(screen.getByLabelText('Destination for https://old.example/a')).toBeInTheDocument();
+    expect(screen.getByLabelText('Destination for https://old.example/b')).toBeInTheDocument();
+    const reads = paths('/matches').filter(r => !r.init.method);
+    expect(reads.map(r => r.url.searchParams.get('cursor'))).toEqual([null, 'original-cursor', null, 'fresh-cursor']);
+    await user.click(screen.getAllByRole('button', { name: 'Approve' })[1]);
+    await waitFor(() => expect(paths('/matches', 'PATCH')).toHaveLength(2));
+    expect(paths('/matches', 'PATCH')[1].body.decisions[0].expected_revision).toBe(7);
+  });
+
+  it('preserves drafts but locks stale decisions when reloading mappings fails', async () => {
+    let broken = false;
+    handler = r => r.url.pathname.endsWith('/matches') && broken ? failure('Review unavailable.') : ordinary(r);
+    const user = userEvent.setup(); mountDetail();
+    const input = await screen.findByLabelText('Destination for https://old.example/a');
+    await user.type(input, 'https://new.example/draft');
+    broken = true;
+    await user.click(screen.getByRole('button', { name: 'Refresh status' }));
+    await screen.findByText('Review unavailable.');
+    expect(input).toHaveValue('https://new.example/draft');
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Set destination' })).toBeDisabled();
+    broken = false;
+    await user.click(screen.getByRole('button', { name: 'Refresh status' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Set destination' })).toBeEnabled());
+  });
+
+  it.each(['https', 'HTTPS', 'hTtPs'])('validates correction URLs and preserves the %s scheme on keyboard submission', async (scheme) => {
+    handler = r => r.init.method === 'PATCH' ? failure() : ordinary(r);
+    const user = userEvent.setup(); mountDetail();
+    const input = await screen.findByLabelText('Destination for https://old.example/a');
+    await user.type(input, 'javascript:alert(1)');
+    await user.click(screen.getByRole('button', { name: 'Set destination' }));
+    expect(paths('/matches', 'PATCH')).toHaveLength(0);
+    await user.clear(input);
+    const destination = `${scheme}://new.example/Case%2FPath?x=A%20B`;
+    await user.type(input, `${destination}{Enter}`);
+    await screen.findByRole('alert');
+    expect(paths('/matches', 'PATCH')[0].body.decisions[0].target_url).toBe(destination);
+    expect(input).toHaveValue(destination);
+  });
+
+  it('never retains another migration’s details, draft or actions after navigation fails', async () => {
+    handler = r => r.url.pathname === '/api/v2/migrations/m2' ? failure('Second migration unavailable.') : ordinary(r);
+    const user = userEvent.setup();
+    render(<MemoryRouter initialEntries={['/migrations/m1']}><Link to="/migrations/m2">Other migration</Link><Routes>
+      <Route path="/migrations/:migrationId" element={<PivotMigrationDetail />} />
+    </Routes></MemoryRouter>);
+    await user.type(await screen.findByLabelText('Destination for https://old.example/a'), 'https://new.example/draft');
+    await user.click(screen.getByRole('link', { name: 'Other migration' }));
+    await screen.findByText('Second migration unavailable.');
+    expect(screen.queryByText('Autumn migration')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue('https://new.example/draft')).not.toBeInTheDocument();
+  });
+});
+
+
+describe('review decisions, provenance and bounded browsing', () => {
+  const jev = { engine: 'jev-url-v1', model: 'fixture', pass: 1, seed_revision: 0,
+    limits: { old_pages: 500, new_pages: 2000, inventory_bytes: 2097152, passes: 3, new_runs_per_24h: 5 } };
+  const proposal = { target_url: 'https://new.example/proposed', confidence: .3, pass: 1, seed_revision: 0, stale: false };
+  it.each(['approved', 'approve', 'set_target', 'accept_repair'])('recognizes authoritative approved state %s without replacing it with a proposal', async review_status => {
+    handler = r => r.url.pathname.endsWith('/matches') ? json(envelope({ items: [{ ...row('a'), review_status,
+      decision_target: 'https://new.example/confirmed', jev_proposal: proposal }], next_cursor: null })) : json(envelope(detail({ jev })));
+    mountDetail();
+    expect(await screen.findByText('Approved destination')).toBeInTheDocument();
+    expect(screen.getByText('https://new.example/confirmed')).toBeInTheDocument();
+    expect(screen.getByText('Model proposal (does not replace your decision): https://new.example/proposed')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Confirm proposed destination' })).toBeDisabled();
+    expect(paths('/matches', 'PATCH')).toHaveLength(0);
+  });
+
+  it('retains opaque cursors and incomplete coverage even when a 500-row request still has a next page', async () => {
+    handler = r => r.url.pathname.endsWith('/matches') ? json(envelope({ items: [row(r.url.searchParams.has('cursor') ? 'b' : 'a')],
+      next_cursor: r.url.searchParams.has('cursor') ? null : 'opaque+/cursor' })) : json(envelope(detail({ jev })));
+    const user = userEvent.setup(); mountDetail();
+    await user.click(await screen.findByRole('button', { name: 'Load up to 500 mappings for this filter' }));
+    await waitFor(() => expect(paths('/matches')).toHaveLength(2));
+    expect(paths('/matches')[1].url.searchParams.get('limit')).toBe('500');
+    expect(screen.getByText(/Find and ordering cover loaded mappings only/)).toBeInTheDocument();
+    expect(screen.queryByText(/All saved mappings for this filter are loaded/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Load more mappings' }));
+    await screen.findByLabelText('Destination for https://old.example/b');
+    expect(paths('/matches')[2].url.searchParams.get('cursor')).toBe('opaque+/cursor');
+    expect(paths('/matches')[2].url.searchParams.get('limit')).toBe('500');
+    expect(screen.getByText(/All saved mappings for this filter are loaded/)).toBeInTheDocument();
+  });
+
+  it('keeps historical runs paginated without a Jev load-all or estimate-order control', async () => {
+    mountDetail(); await screen.findByLabelText('Destination for https://old.example/a');
+    expect(screen.queryByRole('button', { name: 'Load up to 500 mappings for this filter' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Order loaded mappings')).not.toBeInTheDocument();
+  });
+
+  it('focuses save failures in the affected row, clears obsolete success and retains the correction draft', async () => {
+    let saves = 0;
+    handler = r => r.init.method === 'PATCH' ? ++saves === 1 ? json(envelope({ outcomes: [{ code: 'ok' }] })) : failure('Decision unavailable.') : ordinary(r);
+    const user = userEvent.setup(); mountDetail();
+    await user.click(await screen.findByRole('button', { name: 'Approve' }));
+    await screen.findByText(/Destination approved for/);
+    const input = screen.getByLabelText('Destination for https://old.example/a');
+    await waitFor(() => expect(input).toBeEnabled()); await user.type(input, 'https://new.example/draft');
+    await user.click(screen.getByRole('button', { name: 'Set destination' }));
+    const error = await screen.findByRole('alert'); expect(error).toHaveTextContent('Decision unavailable.');
+    expect(error.closest('li')).toBe(input.closest('li')); expect(error).toHaveFocus();
+    expect(input).toHaveValue('https://new.example/draft');
+    expect(screen.queryByText(/Destination approved for/)).not.toBeInTheDocument();
+    const refresh = screen.getByRole('button', { name: 'Refresh status' });
+    await user.click(refresh);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Set destination' })).toBeEnabled());
+    expect(refresh).toHaveFocus();
+  });
+});
+
+describe('selection revision consistency across pages', () => {
+  it('rejects a newer page without merging it, keeps drafts and restores actions only after refresh', async () => {
+    let revision = 4;
+    handler = r => r.url.pathname.endsWith('/matches') ? json(envelope({ items: [row(r.url.searchParams.has('cursor') ? 'b' : 'a', revision)],
+      next_cursor: r.url.searchParams.has('cursor') ? null : 'opaque', selection_revision: revision })) : ordinary(r);
+    const user = userEvent.setup(); mountDetail();
+    const input = await screen.findByLabelText('Destination for https://old.example/a');
+    await user.type(input, 'https://new.example/draft'); revision = 5;
+    await user.click(screen.getByRole('button', { name: 'Load more mappings' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Mappings changed since the previous page');
+    expect(screen.queryByLabelText('Destination for https://old.example/b')).not.toBeInTheDocument();
+    expect(input).toHaveValue('https://new.example/draft');
+    expect(screen.getByRole('button', { name: 'Set destination' })).toBeDisabled();
+    expect(screen.queryByText(/All saved mappings for this filter are loaded/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Refresh status' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Set destination' })).toBeEnabled());
+    expect(input).toHaveValue('https://new.example/draft');
+    await user.click(screen.getByRole('button', { name: 'Load more mappings' }));
+    await screen.findByLabelText('Destination for https://old.example/b');
+  });
+
+  it('does not install a mixed-revision reconstruction during an explicit refresh', async () => {
+    let refreshing = false;
+    handler = r => {
+      if (r.url.pathname.endsWith('/matches')) {
+        const second = r.url.searchParams.has('cursor');
+        return json(envelope({ items: [row(second ? 'b' : 'a', refreshing ? 9 : 4)], next_cursor: second ? null : 'opaque',
+          selection_revision: refreshing ? second ? 10 : 9 : 4 }));
+      }
+      return ordinary(r);
+    };
+    const user = userEvent.setup(); mountDetail();
+    await user.click(await screen.findByRole('button', { name: 'Load more mappings' }));
+    const input = await screen.findByLabelText('Destination for https://old.example/b');
+    await user.type(input, 'https://new.example/draft'); refreshing = true;
+    await user.click(screen.getByRole('button', { name: 'Refresh status' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Mappings changed while pages were loading');
+    expect(input).toHaveValue('https://new.example/draft');
+    expect(screen.getAllByRole('button', { name: 'Approve' }).every(button => button.hasAttribute('disabled'))).toBe(true);
+    expect(screen.queryByText(/All saved mappings for this filter are loaded/)).not.toBeInTheDocument();
+  });
+});
+
+describe('known stale authority recovery', () => {
+  it('requires a fresh mapping read after conflict, preserves the draft, and submits only after another explicit click', async () => {
+    let revision = 0;
+    handler = r => {
+      if (r.init.method === 'PATCH') {
+        if (revision === 0) { revision = 1; return json(envelope({ outcomes: [{ code: 'revision_conflict' }] }, { status: 'partial' })); }
+        expect(r.body.decisions[0]).toMatchObject({ expected_revision: 1, target_url: 'https://new.example/Typed%2FCase' });
+        revision = 2; return json(envelope({ outcomes: [{ code: 'ok' }] }));
+      }
+      if (r.url.pathname.endsWith('/matches')) return json(envelope({ items: [{ ...row('a', revision), review_status: revision ? 'reject' : 'approve' }], next_cursor: null, selection_revision: revision }));
+      if (r.url.pathname === '/api/v2/migrations/m1') return json(envelope(detail({ artifact: { artifact_id: 'snapshot', format: 'csv', included_count: 1, excluded_count: 0 } })));
+      return ordinary(r);
+    };
+    const user = userEvent.setup(); mountDetail();
+    const input = await screen.findByLabelText('Destination for https://old.example/a');
+    await user.type(input, 'https://new.example/Typed%2FCase');
+    const save = screen.getByRole('button', { name: 'Set destination' });
+    await user.click(save); await screen.findByRole('alert');
+    expect(save).toBeDisabled(); expect(input).toHaveValue('https://new.example/Typed%2FCase');
+    expect(screen.getByRole('button', { name: 'Download redirects' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Refresh mappings' }));
+    expect(await screen.findByText(/Current mappings loaded/)).toBeInTheDocument();
+    expect(screen.getByText(/Rejected\. Search traffic/)).toBeInTheDocument();
+    expect(input).toHaveValue('https://new.example/Typed%2FCase'); expect(save).toBeEnabled();
+    expect(paths('/matches', 'PATCH')).toHaveLength(1);
+    await user.click(save); await screen.findByText(/Destination approved for/);
+    const writes = paths('/matches', 'PATCH'); expect(writes).toHaveLength(2);
+    expect(writes[1].body.idempotency_key).not.toBe(writes[0].body.idempotency_key);
+  });
+  it.each([401, 403, 404, 200])('invalidates action availability after HTTP%s download failure while retaining editable drafts', async status => {
+    let accessLost = false;
+    handler = r => {
+      if (r.url.pathname.includes('/artifacts/')) {
+        accessLost = true;
+        return json(envelope({}, { error: { code: status === 404 ? 'not_found' : 'reconnect_required', message: 'Access to the saved file could not be confirmed.' } }), status);
+      }
+      if (r.url.pathname === '/api/v2/migrations/m1') return json(envelope(detail({
+        artifact: accessLost ? undefined : { artifact_id: 'a1', format: 'csv', included_count: 1, excluded_count: 0 },
+        jev: { engine: 'jev-url-v1', model: 'fixture', pass: 1, seed_revision: 0, limits: { passes: 3 } },
+      })));
+      return ordinary(r);
+    };
+    const user = userEvent.setup(); mountDetail();
+    const input = await screen.findByLabelText('Destination for https://old.example/a'); await user.type(input, 'https://new.example/unsaved');
+    await user.click(screen.getByRole('button', { name: 'Download redirects' })); await screen.findByRole('alert');
+    expect(screen.getByRole('button', { name: 'Download redirects' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Set destination' })).toBeDisabled();
+    expect(screen.getByRole('heading', { name: 'Refresh status before continuing' })).toBeInTheDocument();
+    expect(input).toBeEnabled(); expect(input).toHaveValue('https://new.example/unsaved');
+    await user.click(screen.getByRole('button', { name: 'Refresh status' }));
+    await screen.findByRole('heading', { name: 'Prepare an export with your agent' });
+    expect(screen.queryByRole('button', { name: 'Download redirects' })).toBeNull();
+    expect(input).toHaveValue('https://new.example/unsaved');
+    expect(paths('/matches', 'PATCH')).toHaveLength(0);
+  });
+});
+
+it('keeps a correction draft after auth expires and after a failed recovery read', async () => {
+  let blocked = false;
+  handler = r => {
+    if (r.init.method === 'PATCH') blocked = true;
+    return blocked ? json(envelope({}, { error: { code: 'reconnect_required', message: 'Sign in again.' } }), 401) : ordinary(r);
+  };
+  const user = userEvent.setup(); mountDetail();
+  const input = await screen.findByLabelText('Destination for https://old.example/a'); await user.type(input, 'https://new.example/private-draft');
+  await user.click(screen.getByRole('button', { name: 'Set destination' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('Copy unsaved destinations before leaving');
+  expect(screen.getByRole('button', { name: 'Set destination' })).toBeDisabled();
+  await user.click(screen.getByRole('button', { name: 'Refresh mappings' }));
+  await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(2));
+  expect(input).toHaveValue('https://new.example/private-draft'); expect(input).toBeEnabled();
+  expect(screen.getByRole('button', { name: 'Set destination' })).toBeDisabled();
+  expect(paths('/matches', 'PATCH')).toHaveLength(1);
+});
+
+it('keeps a draft discoverable when another reviewer removes its approval and the refreshed filter no longer contains it', async () => {
+  let changed = false;
+  handler = r => {
+    if (r.init.method === 'PATCH') { changed = true; return json(envelope({ outcomes: [{ code: 'revision_conflict' }] }, { status: 'partial' })); }
+    if (r.url.pathname.endsWith('/matches')) return json(envelope({
+      items: changed && r.url.searchParams.get('filter') === 'approved' ? [] : [{ ...row('a', changed ? 1 : 0), review_status: changed ? 'reject' : 'approve' }],
+      next_cursor: null, selection_revision: changed ? 1 : 0,
+    }));
+    return ordinary(r);
+  };
+  const user = userEvent.setup(); mountDetail(); await screen.findByLabelText('Destination for https://old.example/a');
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Show mappings' }), 'approved');
+  const input = await screen.findByLabelText('Destination for https://old.example/a'); await user.type(input, 'https://new.example/keep-draft');
+  await user.click(screen.getByRole('button', { name: 'Set destination' })); await screen.findByRole('alert');
+  await user.click(screen.getByRole('button', { name: 'Refresh mappings' }));
+  const notice = await screen.findByText(/Current mappings loaded/); expect(notice).toHaveFocus();
+  expect(screen.queryByLabelText('Destination for https://old.example/a')).toBeNull();
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Show mappings' }), 'all');
+  expect(await screen.findByLabelText('Destination for https://old.example/a')).toHaveValue('https://new.example/keep-draft');
+  expect(paths('/matches', 'PATCH')).toHaveLength(1);
+});
+
+
+describe('authoritative companion polling lifetime', () => {
+  it('does not overlap delayed reads, stops at terminal status and clears the pending timer on unmount', async () => {
+    vi.useFakeTimers();
+    let finish!: (response: Response) => void;
+    handler = () => new Promise(resolve => { finish = resolve; });
+    const view = mountDetail();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(requests).toHaveLength(1);
+    await act(async () => { finish(json(envelope(detail({run:{status:'running'}}), {next_action:'poll',retry_after_seconds:10}))); });
+    expect(paths('/matches')).toHaveLength(0);
+    handler = () => json(envelope(detail({run_id:undefined,run:undefined}),{status:'failed',next_action:'refine_matches'}));
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    const terminalCount = requests.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+    expect(requests).toHaveLength(terminalCount);
+    handler = () => json(envelope(detail({run:{status:'running'}}),{next_action:'poll',retry_after_seconds:10}));
+    await act(async () => { screen.getByRole('button',{name:'Refresh status'}).click(); });
+    const beforeUnmount = requests.length;
+    view.unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+    expect(requests).toHaveLength(beforeUnmount);
   });
 });

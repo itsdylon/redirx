@@ -56,7 +56,7 @@ EMAIL_TEMPLATES = [
         "description": "Sent when post-cutover monitoring finds new redirect problems",
         "category": "transactional",
         "email_type": "watch_alert",
-        "subject": "[TEST] Broken redirects found",
+        "subject": "[TEST] Redirect monitoring findings",
         "template_name": "watch_alert.html",
         "test_context": {
             "project_name": "Example Migration",
@@ -89,7 +89,7 @@ EMAIL_TEMPLATES = [
                 },
                 {
                     "old_url": "https://old-site.com/contact-us",
-                    "label": "Uses a temporary redirect — no ranking is passed on",
+                    "label": "Uses a temporary redirect — confirm a permanent move should use 301 or 308",
                     "issue_type": "temporary_redirect",
                     "severity": "warning",
                     "clicks_at_risk": 0,

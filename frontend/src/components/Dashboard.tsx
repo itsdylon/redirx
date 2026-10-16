@@ -1,5 +1,10 @@
+import { useProjectActions } from './history/useProjectActions';
+import { DeleteProjectDialog } from './history/DeleteProjectDialog';
+import { useRequestScope } from './pivot/useRequestScope';
+import { MCP_PIVOT_ENABLED } from '../api/config';
+import { useAuth } from '../contexts/AuthContext';
 import { useState, useEffect, useRef } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { DashboardLayout } from './DashboardLayout';
 import { Card } from './ui/card';
@@ -8,7 +13,6 @@ import { Skeleton } from './ui/skeleton';
 import { Clock, Pencil, Check, X, Loader2, Trash2, RefreshCw, Plus, FolderOpen, FileUp, ArrowUpRight, CheckCircle2, BarChart3, Layers } from 'lucide-react';
 import { Progress } from './ui/progress';
 import { fetchDashboardData, DashboardData } from '../api/dashboard';
-import { updateSessionName, deleteSession } from '../api/sessions';
 import { formatDate } from '../utils/date';
 import { toast } from 'sonner';
 import { useOnboarding } from '../contexts/OnboardingContext';
@@ -16,15 +20,17 @@ import { OnboardingEntryModal } from './OnboardingEntryModal';
 import { queryKeys } from '../queries/queryKeys';
 import { handleUnauthorizedAndRedirect } from '../queries/auth';
 
-interface SessionsResponse {
-  sessions: DashboardData['recent_sessions'];
-}
-
 const POLL_INTERVAL = 5000; // 5 seconds
 
 export function Dashboard() {
+  const { user } = useAuth();
+  if (!user) return null;
+  return <DashboardContent key={user.id} ownerId={user.id} />;
+}
+
+function DashboardContent({ ownerId }: { ownerId: string }) {
+  const scope = useRequestScope(ownerId);
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const {
     onboarding,
@@ -41,8 +47,6 @@ export function Dashboard() {
   const [recentlyCompleted, setRecentlyCompleted] = useState<Set<string>>(new Set());
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const previousProcessingRef = useRef<string[]>([]);
-  const [deletedSessionCache, setDeletedSessionCache] = useState<DashboardData['recent_sessions'][number] | null>(null);
-  const undoTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [timeAgo, setTimeAgo] = useState<string>('');
   const [isManualRefreshing, setIsManualRefreshing] = useState(false);
   const [isLaunchingTutorial, setIsLaunchingTutorial] = useState(false);
@@ -65,8 +69,8 @@ export function Dashboard() {
   };
 
   const dashboardQuery = useQuery({
-    queryKey: queryKeys.dashboard.summary,
-    queryFn: fetchDashboardData,
+    queryKey: queryKeys.dashboard.forOwner(ownerId),
+    queryFn: ({ signal }) => fetchDashboardData(signal),
     refetchInterval: (query) => {
       const data = query.state.data as DashboardData | undefined;
       const hasProcessingSessions = data?.recent_sessions?.some(
@@ -88,128 +92,9 @@ export function Dashboard() {
   const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt) : null;
   const isPolling = isFetchingDashboard && !isManualRefreshing && !!dashboardData;
 
-  const updateSessionsCache = (
-    updater: (sessions: DashboardData['recent_sessions']) => DashboardData['recent_sessions']
-  ) => {
-    queryClient.setQueryData<DashboardData>(queryKeys.dashboard.summary, (current) => {
-      if (!current) return current;
-      return { ...current, recent_sessions: updater(current.recent_sessions) };
-    });
-
-    queryClient.setQueryData<SessionsResponse>(queryKeys.sessions.all, (current) => {
-      if (!current) return current;
-      return { ...current, sessions: updater(current.sessions) };
-    });
-  };
-
-  const updateSessionNameMutation = useMutation({
-    mutationFn: ({ sessionId, projectName }: { sessionId: string; projectName: string }) =>
-      updateSessionName(sessionId, projectName),
-    onMutate: async ({ sessionId, projectName }) => {
-      await Promise.all([
-        queryClient.cancelQueries({ queryKey: queryKeys.dashboard.summary }),
-        queryClient.cancelQueries({ queryKey: queryKeys.sessions.all }),
-      ]);
-
-      const previousDashboard = queryClient.getQueryData<DashboardData>(queryKeys.dashboard.summary);
-      const previousSessions = queryClient.getQueryData<SessionsResponse>(queryKeys.sessions.all);
-
-      updateSessionsCache((sessions) =>
-        sessions.map((session) =>
-          session.id === sessionId ? { ...session, project_name: projectName } : session
-        )
-      );
-
-      return { previousDashboard, previousSessions };
-    },
-    onError: (mutationError, _variables, context) => {
-      if (context?.previousDashboard) {
-        queryClient.setQueryData(queryKeys.dashboard.summary, context.previousDashboard);
-      }
-      if (context?.previousSessions) {
-        queryClient.setQueryData(queryKeys.sessions.all, context.previousSessions);
-      }
-
-      if (!handleUnauthorizedAndRedirect(mutationError, navigate)) {
-        console.error('Failed to update session name:', mutationError);
-        toast.error('Failed to update project name. Please try again.');
-      }
-    },
-    onSuccess: () => {
-      setEditingSessionId(null);
-      setEditingName('');
-      toast.success('Project name updated');
-    },
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.dashboard.summary });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
-    },
-  });
-
-  const deleteSessionMutation = useMutation({
-    mutationFn: ({ sessionId }: { sessionId: string }) => deleteSession(sessionId),
-    onMutate: async ({ sessionId }) => {
-      await Promise.all([
-        queryClient.cancelQueries({ queryKey: queryKeys.dashboard.summary }),
-        queryClient.cancelQueries({ queryKey: queryKeys.sessions.all }),
-      ]);
-
-      const previousDashboard = queryClient.getQueryData<DashboardData>(queryKeys.dashboard.summary);
-      const previousSessions = queryClient.getQueryData<SessionsResponse>(queryKeys.sessions.all);
-      const sessionToDelete =
-        previousDashboard?.recent_sessions.find((session) => session.id === sessionId) ??
-        previousSessions?.sessions.find((session) => session.id === sessionId) ??
-        null;
-
-      updateSessionsCache((sessions) => sessions.filter((session) => session.id !== sessionId));
-
-      return { previousDashboard, previousSessions, sessionToDelete };
-    },
-    onError: (mutationError, _variables, context) => {
-      if (context?.previousDashboard) {
-        queryClient.setQueryData(queryKeys.dashboard.summary, context.previousDashboard);
-      }
-      if (context?.previousSessions) {
-        queryClient.setQueryData(queryKeys.sessions.all, context.previousSessions);
-      }
-
-      if (!handleUnauthorizedAndRedirect(mutationError, navigate)) {
-        console.error('Failed to delete session:', mutationError);
-        toast.error(
-          mutationError instanceof Error
-            ? mutationError.message
-            : 'Failed to delete project. Please try again.'
-        );
-      }
-      setDeletingSessionId(null);
-    },
-    onSuccess: (_data, _variables, context) => {
-      if (context?.sessionToDelete) {
-        setDeletedSessionCache(context.sessionToDelete);
-
-        if (undoTimeoutRef.current) {
-          clearTimeout(undoTimeoutRef.current);
-        }
-
-        undoTimeoutRef.current = setTimeout(() => {
-          setDeletedSessionCache(null);
-        }, 8000);
-
-        toast.success('Project deleted', {
-          duration: 8000,
-          action: {
-            label: 'Undo',
-            onClick: () => handleUndoDelete(context.sessionToDelete),
-          },
-        });
-      }
-
-      setDeletingSessionId(null);
-    },
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.dashboard.summary });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
-    },
+  const { rename: updateSessionNameMutation, remove: deleteSessionMutation } = useProjectActions(ownerId, {
+    onRenamed: () => { setEditingSessionId(null); setEditingName(''); },
+    onDeleted: () => setDeletingSessionId(null),
   });
 
   const isDeleting = deletingSessionId !== null && deleteSessionMutation.isPending;
@@ -224,17 +109,19 @@ export function Dashboard() {
     setIsManualRefreshing(true);
     try {
       const result = await refetchDashboard();
+      if (scope.signal().aborted) return;
       if (result.error) {
         throw result.error;
       }
       toast.success('Dashboard refreshed');
     } catch (err) {
+      if (scope.signal().aborted) return;
       if (!handleUnauthorizedAndRedirect(err, navigate)) {
         console.error('Error refreshing dashboard:', err);
-        toast.error('Failed to refresh dashboard');
+        if (!scope.signal().aborted) toast.error('Failed to refresh dashboard');
       }
     } finally {
-      setIsManualRefreshing(false);
+      if (!scope.signal().aborted) setIsManualRefreshing(false);
     }
   };
 
@@ -281,7 +168,7 @@ export function Dashboard() {
 
   // Auto-show onboarding entry modal for new users or forced replay.
   useEffect(() => {
-    if (loading || onboardingLoading || !dashboardData || !onboarding) {
+    if (MCP_PIVOT_ENABLED || loading || onboardingLoading || !dashboardData || !onboarding) {
       return;
     }
 
@@ -323,46 +210,57 @@ export function Dashboard() {
   const handleTrySampleTutorial = async () => {
     setIsLaunchingTutorial(true);
     try {
-      await startOnboarding();
+      const started = await startOnboarding();
+      if (scope.signal().aborted) return;
+      if (!started) throw new Error('Unable to start the tutorial. Try again.');
       const selected = await selectPath('sample');
+      if (scope.signal().aborted) return;
       if (!selected) {
         throw new Error('Unable to initialize tutorial path');
       }
       setEntryModalOpen(false);
       navigate('/upload?tutorial=1&sample=1');
     } catch (err) {
+      if (scope.signal().aborted) return;
       toast.error(err instanceof Error ? err.message : 'Failed to launch sample tutorial');
     } finally {
-      setIsLaunchingTutorial(false);
+      if (!scope.signal().aborted) setIsLaunchingTutorial(false);
     }
   };
 
   const handleUseOwnCsvTutorial = async () => {
     setIsLaunchingTutorial(true);
     try {
-      await startOnboarding();
+      const started = await startOnboarding();
+      if (scope.signal().aborted) return;
+      if (!started) throw new Error('Unable to start the tutorial. Try again.');
       const selected = await selectPath('real');
+      if (scope.signal().aborted) return;
       if (!selected) {
         throw new Error('Unable to initialize tutorial path');
       }
       setEntryModalOpen(false);
       navigate('/upload?tutorial=1');
     } catch (err) {
+      if (scope.signal().aborted) return;
       toast.error(err instanceof Error ? err.message : 'Failed to launch tutorial');
     } finally {
-      setIsLaunchingTutorial(false);
+      if (!scope.signal().aborted) setIsLaunchingTutorial(false);
     }
   };
 
   const handleSkipTutorial = async () => {
     setIsLaunchingTutorial(true);
     try {
-      await dismissOnboarding();
+      const dismissed = await dismissOnboarding();
+      if (scope.signal().aborted) return;
+      if (!dismissed) throw new Error('The tutorial was not dismissed. Try again.');
       setEntryModalOpen(false);
     } catch (err) {
+      if (scope.signal().aborted) return;
       toast.error(err instanceof Error ? err.message : 'Failed to dismiss tutorial');
     } finally {
-      setIsLaunchingTutorial(false);
+      if (!scope.signal().aborted) setIsLaunchingTutorial(false);
     }
   };
 
@@ -377,33 +275,17 @@ export function Dashboard() {
   };
 
   const handleSaveEdit = (sessionId: string) => {
-    updateSessionNameMutation.mutate({ sessionId, projectName: editingName });
+    if (!updateSessionNameMutation.isPending && editingName.trim()) updateSessionNameMutation.mutate({ sessionId, projectName: editingName.trim() });
   };
 
   const handleDeleteClick = (sessionId: string) => {
+    deleteSessionMutation.reset();
     setDeletingSessionId(sessionId);
   };
 
   const handleConfirmDelete = () => {
     if (!deletingSessionId) return;
     deleteSessionMutation.mutate({ sessionId: deletingSessionId });
-  };
-
-  const handleUndoDelete = (session: DashboardData['recent_sessions'][number]) => {
-    if (undoTimeoutRef.current) {
-      clearTimeout(undoTimeoutRef.current);
-      undoTimeoutRef.current = null;
-    }
-
-    updateSessionsCache((sessions) =>
-      [...sessions, session].sort(
-        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-      )
-    );
-
-    setDeletedSessionCache(null);
-    toast.success('Project restored');
-    void refetchDashboard();
   };
 
   const handleCancelDelete = () => {
@@ -414,24 +296,9 @@ export function Dashboard() {
   const sessions = dashboardData?.recent_sessions || [];
   const totalSessions = dashboardData?.total_sessions ?? sessions.length;
   const totalRedirects = dashboardData?.total_redirects ?? sessions.reduce((sum, s) => sum + (s.total_mappings || 0), 0);
-  const totalApproved = sessions.reduce((sum, s) => sum + (s.approved_mappings || 0), 0);
-  const approvalProgress = totalRedirects > 0 ? Math.round((totalApproved / totalRedirects) * 100) : 0;
-  const completedSessions = sessions.filter(s => s.status === 'completed');
+  const approvalProgress = dashboardData?.approval_progress ?? 0;
   const processingSessions = sessions.filter(s => s.status === 'processing' || s.status === 'pending');
-  // Use API average_confidence if available, otherwise compute from session data
-  const avgConfidence = (() => {
-    if (dashboardData?.average_confidence && dashboardData.average_confidence > 0) {
-      return dashboardData.average_confidence;
-    }
-    // Estimate from approved/total ratio of completed sessions as a proxy
-    const completedWithMappings = completedSessions.filter(s => (s.total_mappings || 0) > 0);
-    if (completedWithMappings.length === 0) return 0;
-    const avgApprovalRate = completedWithMappings.reduce((sum, s) => {
-      const rate = (s.approved_mappings || 0) / (s.total_mappings || 1);
-      return sum + rate;
-    }, 0) / completedWithMappings.length;
-    return Math.round(avgApprovalRate * 100);
-  })();
+  const avgConfidence = Number.isFinite(dashboardData?.average_confidence) ? dashboardData!.average_confidence : null;
   const confidenceBreakdown = dashboardData?.confidence_breakdown ?? { high: 0, medium: 0, low: 0, exact: 0 };
   const confidenceTotal = confidenceBreakdown.high + confidenceBreakdown.medium + confidenceBreakdown.low + confidenceBreakdown.exact;
 
@@ -439,7 +306,7 @@ export function Dashboard() {
     return (
       <DashboardLayout title="Dashboard">
         <div>
-          <div className="grid grid-cols-4 gap-4 mb-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
             {Array.from({ length: 4 }).map((_, index) => (
               <Card key={`stats-skeleton-${index}`} className="!gap-0 p-5 flex flex-col justify-between">
                 <div className="flex items-center justify-between">
@@ -454,7 +321,7 @@ export function Dashboard() {
             ))}
           </div>
 
-          <div className="flex justify-between items-center mb-4">
+          <div className="flex flex-wrap gap-3 justify-between items-center mb-4">
             <div className="flex items-center gap-3">
               <Skeleton className="h-6 w-28" />
               <Skeleton className="h-4 w-24" />
@@ -466,8 +333,8 @@ export function Dashboard() {
           </div>
 
           <Card>
-            <div className="overflow-hidden">
-              <table className="w-full">
+            <div className="overflow-x-auto" role="region" aria-label="Project history table" tabIndex={0}>
+              <table className="w-full min-w-[48rem]">
                 <thead className="bg-muted border-b border-border">
                   <tr>
                     <th className="text-left p-4 text-muted-foreground text-sm">Project Name</th>
@@ -548,14 +415,14 @@ export function Dashboard() {
           <p className="text-muted-foreground mb-6 text-center max-w-md">
             Upload CSV files containing your old and new URLs to start generating redirect mappings.
           </p>
-          <Button size="lg" onClick={() => navigate('/upload')}>
+          <Button size="lg" onClick={() => navigate(MCP_PIVOT_ENABLED ? '/companion' : '/upload')}>
             Create Your First Redirect Job
           </Button>
         </div>
       ) : (
         <div>
           {/* Bento Stats Grid */}
-          <div className="grid grid-cols-4 gap-4 mb-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
             {/* Total Redirects */}
             <Card className="!gap-0 p-5 flex flex-col justify-between">
               <div className="flex items-center justify-between">
@@ -580,7 +447,7 @@ export function Dashboard() {
                 <div className="text-3xl font-semibold text-foreground mt-3">{approvalProgress}%</div>
                 <Progress value={approvalProgress} className="h-1.5 mt-2" />
                 <p className="text-xs text-muted-foreground mt-1">
-                  {totalApproved.toLocaleString()} of {totalRedirects.toLocaleString()} approved
+                  Across all historical projects
                 </p>
               </div>
             </Card>
@@ -592,9 +459,9 @@ export function Dashboard() {
                 <BarChart3 className="h-4 w-4 text-muted-foreground" />
               </div>
               <div>
-                <div className="text-3xl font-semibold text-foreground mt-3">{avgConfidence > 0 ? `${avgConfidence}%` : '0%'}</div>
+                <div className="text-3xl font-semibold text-foreground mt-3">{avgConfidence !== null ? `${avgConfidence}%` : 'Unavailable'}</div>
                 <p className="text-xs text-muted-foreground mt-1">
-                  {completedSessions.length} completed job{completedSessions.length !== 1 ? 's' : ''}
+                  Model estimate; not a guarantee
                 </p>
               </div>
             </Card>
@@ -615,7 +482,7 @@ export function Dashboard() {
           </div>
 
           {/* Recent Jobs Header */}
-          <div className="flex justify-between items-center mb-4">
+          <div className="flex flex-wrap gap-3 justify-between items-center mb-4">
             <div className="flex items-center gap-3">
               <h2 className="text-lg font-semibold text-foreground">Recent Jobs</h2>
               {lastUpdated && (
@@ -651,7 +518,7 @@ export function Dashboard() {
               </Button>
               <Button
                 size="sm"
-                onClick={() => navigate('/upload')}
+                onClick={() => navigate(MCP_PIVOT_ENABLED ? '/companion' : '/upload')}
               >
                 <Plus className="h-4 w-4 mr-2" />
                 New Job
@@ -661,8 +528,8 @@ export function Dashboard() {
 
           {/* Jobs Table */}
           <Card>
-            <div className="overflow-hidden">
-              <table className="w-full">
+            <div className="overflow-x-auto" role="region" aria-label="Project history table" tabIndex={0}>
+              <table className="w-full min-w-[48rem]">
                 <thead className="bg-muted border-b border-border">
                   <tr>
                     <th className="text-left p-4 text-muted-foreground text-sm">Project Name</th>
@@ -678,11 +545,13 @@ export function Dashboard() {
                       key={session.id}
                       className={index !== sessions.length - 1 ? 'border-b border-border' : ''}
                     >
-                      <td className="p-4 text-foreground">
+                      <td className="min-w-56 p-4 text-foreground">
                         {editingSessionId === session.id ? (
                           <div className="flex items-center gap-2">
                             <input
                               type="text"
+                              aria-label="Project name"
+                              disabled={updateSessionNameMutation.isPending}
                               value={editingName}
                               onChange={(e) => setEditingName(e.target.value)}
                               onKeyDown={(e) => {
@@ -696,6 +565,7 @@ export function Dashboard() {
                               onClick={() => handleSaveEdit(session.id)}
                               className="text-green-600 dark:text-green-400 hover:text-green-700 dark:hover:text-green-300"
                               title="Save"
+                          disabled={updateSessionNameMutation.isPending || !editingName.trim()}
                             >
                               <Check className="h-4 w-4" />
                             </button>
@@ -709,11 +579,12 @@ export function Dashboard() {
                           </div>
                         ) : (
                           <div className="flex items-center gap-2">
-                            <span>{session.project_name || 'Untitled Session'}</span>
+                            <span className="break-words min-w-0">{session.project_name || 'Untitled Session'}</span>
                             <button
                               onClick={() => handleStartEdit(session.id, session.project_name)}
                               className="text-muted-foreground hover:text-foreground"
                               title="Edit project name"
+                          disabled={updateSessionNameMutation.isPending}
                             >
                               <Pencil className="h-3 w-3" />
                             </button>
@@ -762,6 +633,7 @@ export function Dashboard() {
                             onClick={() => handleDeleteClick(session.id)}
                             className="text-destructive hover:text-destructive hover:bg-destructive/10"
                             title="Delete project"
+                        aria-label={`Delete ${session.project_name || 'Untitled Session'}`}
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
@@ -844,37 +716,20 @@ export function Dashboard() {
         </div>
       )}
 
-      {/* Delete Confirmation Dialog */}
-      {deletingSessionId && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <Card className="p-6 max-w-md w-full mx-4">
-            <h3 className="text-foreground text-lg font-semibold mb-2">Delete Project</h3>
-            <p className="text-muted-foreground mb-6">
-              Are you sure you want to delete this project? This will permanently remove all
-              redirect mappings and cannot be undone.
-            </p>
-            <div className="flex justify-end gap-3">
-              <Button variant="outline" onClick={handleCancelDelete} disabled={isDeleting}>
-                Cancel
-              </Button>
-              <Button
-                variant="destructive"
-                onClick={handleConfirmDelete}
-                disabled={isDeleting}
-              >
-                {isDeleting && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
-                {isDeleting ? 'Deleting...' : 'Delete Project'}
-              </Button>
-            </div>
-          </Card>
-        </div>
-      )}
+      <DeleteProjectDialog
+        open={deletingSessionId !== null}
+        name={sessions.find(session => session.id === deletingSessionId)?.project_name || 'Untitled Session'}
+        busy={isDeleting}
+        error={deleteSessionMutation.error instanceof Error ? deleteSessionMutation.error.message : null}
+        onCancel={handleCancelDelete}
+        onConfirm={handleConfirmDelete}
+      />
 
       <OnboardingEntryModal
         open={entryModalOpen}
         loading={isLaunchingTutorial}
         error={onboardingError}
-        onOpenChange={setEntryModalOpen}
+        onOpenChange={open => { if (!isLaunchingTutorial) setEntryModalOpen(open); }}
         onTrySample={handleTrySampleTutorial}
         onUseOwnCsv={handleUseOwnCsvTutorial}
         onSkip={handleSkipTutorial}

@@ -203,6 +203,10 @@ class DatabaseHTTPAcceptance(unittest.TestCase):
         self.assertFalse(inventory['coverage']['complete'])
         self.assertFalse(inventory['coverage']['network_checked'])
         self.assertNotIn('exclusions', inventory)
+        self.assertEqual(inventory['input_issues']['total_excluded'], 1)
+        self.assertEqual(inventory['input_issues']['examples'], [
+            {'code': 'undeclared_origin', 'url_hint': 'https://unrelated.example/a'}])
+        self.assertTrue(inventory['input_issues']['diagnostics_complete'])
         self.assertEqual(self.post(url, old).json['data']['inventory']['id'], inventory['id'])
         conflict = self.post(url, {**old, 'rows':['https://old.example/different']})
         self.assertEqual(conflict.status_code, 409)

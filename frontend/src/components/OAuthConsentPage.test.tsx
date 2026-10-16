@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { OAuthConsentPage } from './OAuthConsentPage';
@@ -110,4 +110,66 @@ describe('OAuthConsentPage', () => {
     ));
     expect(localStorage.getItem('auth_redirect')).toBe('/oauth/consent?authorization_id=request-1&state=abc');
   });
+  it('waits for auth hydration instead of sending an existing session to login', async () => {
+    mockUseAuth.mockReturnValue({ user: null, loading: true });
+    renderConsent();
+    expect(screen.getByRole('heading', { name: 'Checking your sign-in' })).toBeInTheDocument();
+    expect(mockNavigate).not.toHaveBeenCalled();
+    expect(mockGetAuthorizationDetails).not.toHaveBeenCalled();
+  });
+
+  it('offers account hydration recovery without restarting sign-in', async () => {
+    const retryAuth = vi.fn().mockResolvedValue(undefined);
+    mockUseAuth.mockReturnValue({ user: null, loading: false, authError: 'Your sign-in is saved.', retryAuth });
+    renderConsent();
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Retry account loading' }));
+    expect(retryAuth).toHaveBeenCalledTimes(1);
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it('retries authorization reads explicitly without approving or denying', async () => {
+    mockGetAuthorizationDetails.mockRejectedValueOnce(new Error('Network unavailable'))
+      .mockResolvedValueOnce({ data: details, error: null });
+    renderConsent();
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Reload authorization request' }));
+    expect(await screen.findByRole('heading', { name: 'Connect MCP Studio' })).toBeInTheDocument();
+    expect(mockGetAuthorizationDetails).toHaveBeenCalledTimes(2);
+    expect(mockApproveAuthorization).not.toHaveBeenCalled();
+    expect(mockDenyAuthorization).not.toHaveBeenCalled();
+  });
+
+  it('recognizes a structured expired provider error', async () => {
+    mockGetAuthorizationDetails.mockResolvedValue({ data: null, error: { message: 'Authorization request expired' } });
+    renderConsent();
+    expect(await screen.findByRole('heading', { name: 'Authorization request expired' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reload authorization request' })).not.toBeInTheDocument();
+  });
+
+  it('recovers from a stalled decision by reading state, never replaying approval', async () => {
+    vi.useFakeTimers();
+    try {
+      mockApproveAuthorization.mockImplementationOnce(() => new Promise(() => {}));
+      renderConsent();
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { screen.getByRole('button', { name: 'Approve connection' }).click(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+      expect(screen.getByText(/outcome is not confirmed/)).toBeInTheDocument();
+      await act(async () => { screen.getByRole('button', { name: 'Reload authorization request' }).click(); });
+      expect(screen.getByRole('heading', { name: 'Connect MCP Studio' })).toBeInTheDocument();
+      expect(mockApproveAuthorization).toHaveBeenCalledTimes(1);
+      expect(mockGetAuthorizationDetails).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not redirect from an approval that finishes after leaving consent', async () => {
+    let finish!: (value: unknown) => void;
+    mockApproveAuthorization.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    const view = renderConsent();
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Approve connection' }));
+    view.unmount();
+    await act(async () => finish({ data: { redirect_url: 'https://mcp.example.com/callback?code=late' }, error: null }));
+    expect(window.location.assign).not.toHaveBeenCalled();
+    expect(mockApproveAuthorization).toHaveBeenCalledTimes(1);
+  });
+
 });

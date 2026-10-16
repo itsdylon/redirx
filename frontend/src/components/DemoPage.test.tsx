@@ -1,0 +1,22 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { act, cleanup, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
+import { DemoPage } from './DemoPage';
+const audit = vi.hoisted(() => vi.fn());
+vi.mock('../api/demo', () => ({ startSiteAudit: audit }));
+afterEach(() => { cleanup(); audit.mockReset(); });
+it('cancels the audit on navigation and ignores callbacks from a canceled run', async () => {
+  const controller = new AbortController(); let handlers: any;
+  audit.mockImplementation((_url, callbacks) => { handlers = callbacks; return controller; });
+  const view = render(<MemoryRouter><DemoPage /></MemoryRouter>); const user = userEvent.setup();
+  await user.type(screen.getByRole('textbox', { name: 'Website to audit' }), 'example.com');
+  await user.click(screen.getByRole('button', { name: 'Audit My Site' }));
+  await user.click(screen.getByRole('button', { name: 'Cancel' }));
+  expect(controller.signal.aborted).toBe(true);
+  act(() => handlers.onError({ message: 'Stale failure' }));
+  expect(screen.queryByText('Stale failure')).not.toBeInTheDocument();
+  const controller2 = new AbortController(); audit.mockReturnValue(controller2);
+  await user.click(screen.getByRole('button', { name: 'Audit My Site' })); view.unmount();
+  expect(controller2.signal.aborted).toBe(true);
+});

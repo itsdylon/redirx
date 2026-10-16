@@ -1,6 +1,6 @@
-import { uploadCSVs, type ContentUrlCapError } from "../api/pipeline";
-import { useEffect, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { uploadCSVs, UploadNotConfirmedError, type ContentUrlCapError } from "../api/pipeline";
+import { useEffect, useRef, useState } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { usePostHog } from '@posthog/react';
 import { useAuth } from '../contexts/AuthContext';
 import { useOnboarding } from '../contexts/OnboardingContext';
@@ -19,6 +19,7 @@ import { validateFile, FileValidationResult } from '../utils/validation';
 import { appQueryClient } from '../queries/queryClient';
 import { queryKeys } from '../queries/queryKeys';
 import { CONTENT_MAX_URLS_PER_SITE } from '../api/config';
+import { useRequestScope } from './pivot/useRequestScope';
 
 interface FileData {
   name: string;
@@ -66,7 +67,13 @@ interface UploadPageProps {
   layoutVariant?: 'dashboard' | 'tool';
 }
 
-export function UploadPage({
+export function UploadPage(props: UploadPageProps = {}) {
+  const { user } = useAuth();
+  if (!user) return null;
+  return <UploadPageContent key={user.id} {...props} />;
+}
+
+function UploadPageContent({
   quickOnly = false,
   flowSource = 'upload',
   layoutVariant = 'dashboard',
@@ -75,6 +82,7 @@ export function UploadPage({
   const posthog = usePostHog();
   const [searchParams] = useSearchParams();
   const { user } = useAuth();
+  const requestScope = useRequestScope(`upload:${user?.id}`);
   const {
     onboarding,
     startOnboarding,
@@ -93,6 +101,8 @@ export function UploadPage({
   const [oldSiteFile, setOldSiteFile] = useState<FileData | null>(null);
   const [newSiteFile, setNewSiteFile] = useState<FileData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [uploadNotConfirmed, setUploadNotConfirmed] = useState(false);
+  const uploadRequest = useRef<AbortController | null>(null);
   const [contentCapApiError, setContentCapApiError] = useState<ContentUrlCapError | null>(null);
   const [duplicateSessionId, setDuplicateSessionId] = useState<string | null>(null);
 
@@ -103,6 +113,15 @@ export function UploadPage({
   // Validation state
   const [oldFileValidation, setOldFileValidation] = useState<FileValidationResult | null>(null);
   const [newFileValidation, setNewFileValidation] = useState<FileValidationResult | null>(null);
+  const fileRevision = useRef({ old: 0, new: 0 });
+  const fileReads = useRef<{ old?: AbortController; new?: AbortController }>({});
+  const [checkingFiles, setCheckingFiles] = useState<{ old: string | null; new: string | null }>({ old: null, new: null });
+  useEffect(() => () => {
+    fileReads.current.old?.abort();
+    fileReads.current.new?.abort();
+    fileRevision.current.old += 1;
+    fileRevision.current.new += 1;
+  }, []);
   const [pendingWarnings, setPendingWarnings] = useState<{ old: string[], new: string[] } | null>(null);
   const [showCoachmarks, setShowCoachmarks] = useState(false);
   const [ingestMode, setIngestMode] = useState<'domains' | 'csv'>('domains');
@@ -210,6 +229,11 @@ export function UploadPage({
   const [scrapingWarningAcknowledged, setScrapingWarningAcknowledged] = useState(false);
 
   const handleFileUpload = async (file: File, type: 'old' | 'new') => {
+    const revision = ++fileRevision.current[type];
+    fileReads.current[type]?.abort();
+    const controller = new AbortController();
+    fileReads.current[type] = controller;
+    setCheckingFiles(previous => ({ ...previous, [type]: file.name }));
     setContentCapApiError(null);
     setPendingWarnings(null);
     setError(null);
@@ -226,7 +250,17 @@ export function UploadPage({
     }
 
     // Validate the file (CSV, TXT, XML, or XLSX)
-    const validationResult = await validateFile(file);
+    let validationResult: FileValidationResult;
+    try {
+      validationResult = await validateFile(file, controller.signal);
+    } catch {
+      if (controller.signal.aborted || revision !== fileRevision.current[type]) return;
+      validationResult = { valid: false, rowCount: 0, warnings: [], errors: ['Could not read this file. Choose it again or export a new copy.'] };
+    }
+    // A newer selection, removal, mode switch or unmount owns this side now.
+    if (revision !== fileRevision.current[type] || controller.signal.aborted) return;
+    setCheckingFiles(previous => ({ ...previous, [type]: null }));
+    delete fileReads.current[type];
 
     if (type === 'old') {
       setOldFileValidation(validationResult);
@@ -258,6 +292,9 @@ export function UploadPage({
   };
 
   const handleDomainDiscovered = (side: 'old' | 'new', result: DiscoveryResponse | null) => {
+    fileRevision.current[side] += 1;
+    fileReads.current[side]?.abort();
+    setCheckingFiles(previous => ({ ...previous, [side]: null }));
     setContentCapApiError(null);
     setPendingWarnings(null);
     setError(null);
@@ -308,6 +345,10 @@ export function UploadPage({
   };
 
   const handleFileRemove = (type: 'old' | 'new') => {
+    fileRevision.current[type] += 1;
+    fileReads.current[type]?.abort();
+    delete fileReads.current[type];
+    setCheckingFiles(previous => ({ ...previous, [type]: null }));
     setContentCapApiError(null);
     setPendingWarnings(null);
     setError(null);
@@ -327,11 +368,37 @@ export function UploadPage({
     setNewFileValidation(null);
   };
 
+  const showUnconfirmedUpload = () => {
+    setIsUploading(false);
+    setIsLoading(false);
+    setCurrentSessionId(null);
+    setUploadNotConfirmed(true);
+    setError(new UploadNotConfirmedError().message);
+    if (user?.id) {
+      // A stopped wait can still mean a saved job. Read current owned history.
+      void appQueryClient.invalidateQueries({ queryKey: queryKeys.sessions.forOwner(user.id) });
+      void appQueryClient.invalidateQueries({ queryKey: queryKeys.dashboard.forOwner(user.id) });
+    }
+  };
+
+  const stopWaitingForUpload = () => {
+    const request = uploadRequest.current;
+    if (!request || requestScope.signal().aborted) return;
+    uploadRequest.current = null;
+    request.abort();
+    // Do not depend on fetch rejecting: even an abort-ignoring transport must
+    // release this UI. The abandoned attempt cannot publish a late response.
+    showUnconfirmedUpload();
+  };
+
   const handleBeginMatching = async ({
     force = false,
     skipWarningCheck = false,
     skipScrapingWarning = false,
   }: BeginMatchingOptions = {}) => {
+    const signal = requestScope.signal();
+    if (signal.aborted || uploadRequest.current) return;
+    setUploadNotConfirmed(false);
     if (sampleTutorialActive) {
       setError(null);
       setDuplicateSessionId(null);
@@ -341,14 +408,17 @@ export function UploadPage({
 
       try {
         const sample = await createSampleSession();
+        if (signal.aborted) return;
         if (sample.session_id) {
           setCurrentSessionId(sample.session_id);
         }
         void appQueryClient.invalidateQueries({ queryKey: queryKeys.dashboard.summary });
         void appQueryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
         await completeStep('generate_mappings');
+        if (signal.aborted) return;
         setIsUploading(false);
       } catch (err) {
+        if (signal.aborted) return;
         console.error(err);
         setIsUploading(false);
         setIsLoading(false);
@@ -397,6 +467,12 @@ export function UploadPage({
     setIsUploading(true);
     setIsLoading(true);
 
+    const request = new AbortController();
+    uploadRequest.current = request;
+    const abortRequest = () => request.abort();
+    signal.addEventListener('abort', abortRequest, { once: true });
+    request.signal.addEventListener('abort', () => signal.removeEventListener('abort', abortRequest), { once: true });
+
     if (effectivePipelineType === 'url_only') {
       posthog?.capture('quick_match_upload_started', {
         plan: userPlan,
@@ -408,7 +484,10 @@ export function UploadPage({
     }
 
     try {
-      const result = await uploadCSVs(oldCsvFile, newCsvFile, force, effectivePipelineType);
+      const result = await uploadCSVs(oldCsvFile, newCsvFile, force, effectivePipelineType, request.signal);
+      if (signal.aborted || request.signal.aborted) return;
+      // Acknowledged uploads now belong to the session's processing lifecycle.
+      uploadRequest.current = null;
 
       console.log("Pipeline Response:", result);
 
@@ -429,9 +508,11 @@ export function UploadPage({
       void appQueryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
       if (tutorialActive) {
         await completeStep('generate_mappings');
+        if (signal.aborted || request.signal.aborted) return;
       }
       setIsUploading(false);
     } catch (err) {
+      if (signal.aborted || request.signal.aborted) return;
       console.error(err);
       setIsUploading(false);
       setIsLoading(false);
@@ -441,10 +522,14 @@ export function UploadPage({
         setContentCapApiError(err as ContentUrlCapError);
         setError(null);
       } else if (err instanceof Error) {
-        setError(err.message);
+        if (err instanceof UploadNotConfirmedError) showUnconfirmedUpload();
+        else setError(err.message);
       } else {
         setError("An unexpected error occurred.");
       }
+    } finally {
+      signal.removeEventListener('abort', abortRequest);
+      if (uploadRequest.current === request) uploadRequest.current = null;
     }
   };
 
@@ -540,11 +625,20 @@ export function UploadPage({
   if (isLoading) {
     return (
       <Layout title="Processing">
-        <LoadingScreen
+        {!sampleTutorialActive && !currentSessionId ? (
+          <section className="mx-auto max-w-xl py-12 space-y-6" aria-labelledby="upload-wait-title">
+            <Loader2 className="h-8 w-8 animate-spin motion-reduce:animate-none text-primary" aria-hidden="true" />
+            <div className="space-y-3" role="status">
+              <h1 id="upload-wait-title" className="text-2xl font-semibold">Waiting for upload confirmation</h1>
+              <p className="text-muted-foreground">We haven’t received confirmation for this upload. Stopping here does not cancel a job the server may have accepted.</p>
+            </div>
+            <Button type="button" variant="outline" onClick={stopWaitingForUpload}>Stop waiting</Button>
+          </section>
+        ) : <LoadingScreen
           sessionId={currentSessionId}
           tutorialMode={sampleTutorialActive}
           minDisplayMs={sampleTutorialActive ? 4500 : 0}
-        />
+        />}
       </Layout>
     );
   }
@@ -701,8 +795,13 @@ export function UploadPage({
 
           {/* General Error */}
           {error && (
-            <div className="mb-6 border border-destructive bg-destructive/10 p-4 text-destructive">
-              {error}
+            <div role="alert" className="mb-6 border border-destructive bg-destructive/10 p-4 text-destructive">
+              <p>{error}</p>
+              {uploadNotConfirmed && (
+                <Link to="/projects" className="mt-3 inline-block underline underline-offset-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4">
+                  Check Project History
+                </Link>
+              )}
             </div>
           )}
 
@@ -906,13 +1005,14 @@ export function UploadPage({
           )}
 
           {ingestMode === 'csv' && (
-          <div className="grid grid-cols-2 gap-6 mb-8">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
             <div className={tutorialActive && showCoachmarks ? 'rounded-md ring-2 ring-[#26D99D]/75 p-2 bg-[#26D99D]/8 dark:bg-[#26D99D]/14' : ''}>
               <FileUploadZone
                 label="Old Site CSV"
                 onFileUpload={(file) => handleFileUpload(file, 'old')}
                 onFileRemove={() => handleFileRemove('old')}
                 file={oldSiteFile}
+                checkingFileName={checkingFiles.old}
                 validationError={oldFileValidation && !oldFileValidation.valid ? oldFileValidation.errors.join(', ') : null}
               />
               {contentCapPanelData?.showOld && effectivePipelineType === 'content' && (
@@ -927,6 +1027,7 @@ export function UploadPage({
                 onFileUpload={(file) => handleFileUpload(file, 'new')}
                 onFileRemove={() => handleFileRemove('new')}
                 file={newSiteFile}
+                checkingFileName={checkingFiles.new}
                 validationError={newFileValidation && !newFileValidation.valid ? newFileValidation.errors.join(', ') : null}
               />
               {contentCapPanelData?.showNew && effectivePipelineType === 'content' && (

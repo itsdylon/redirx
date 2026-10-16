@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import {
   Sheet,
@@ -13,14 +13,7 @@ import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Separator } from './ui/separator';
 import { RedirectMapping } from './ReviewInterface';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from './ui/select';
-import { validateUrl, debounce } from '../utils/validation';
+import { validateUrl } from '../utils/validation';
 import { getAlternatives, Alternative } from '../api/pipeline';
 
 /**
@@ -55,7 +48,7 @@ function AnimatedNumber({ value, duration = 500, delay = 0 }: { value: number; d
 interface InlineEditDialogProps {
   redirect: RedirectMapping;
   sessionId: string;
-  onSave: (redirect: RedirectMapping) => void;
+  onSave: (redirect: RedirectMapping) => void | Promise<void>;
   onCancel: () => void;
   pipelineType?: string;
 }
@@ -71,41 +64,42 @@ export function InlineEditDialog({ redirect, sessionId, onSave, onCancel, pipeli
   const [alternativesError, setAlternativesError] = useState<string | null>(null);
   const [alternativesVisible, setAlternativesVisible] = useState(false);
 
-  const debouncedValidate = useCallback(
-    debounce((url: string) => {
-      const result = validateUrl(url);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const saveLock = useRef(false);
+  const returnFocus = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    setIsValidating(true);
+    const timer = setTimeout(() => {
+      const result = validateUrl(editedRedirect.newUrl);
       setUrlError(result.error);
       setIsUrlValid(result.valid);
       setIsValidating(false);
-    }, 300),
-    []
-  );
-
-  useEffect(() => {
-    const result = validateUrl(editedRedirect.newUrl);
-    setUrlError(result.error);
-    setIsUrlValid(result.valid);
-  }, []);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [editedRedirect.newUrl]);
 
   useEffect(() => {
     if (pipelineType === 'url_only') {
       setAlternativesLoading(false);
       return;
     }
+    let active = true;
     async function fetchAlternatives() {
       try {
         setAlternativesLoading(true);
         setAlternativesError(null);
         const data = await getAlternatives(sessionId, redirect.id);
+        if (!active) return;
         setAlternatives(data.alternatives || []);
         if (data.message) setAlternativesError(data.message);
       } catch (err) {
-        setAlternativesError(err instanceof Error ? err.message : 'Failed to load alternatives');
+        if (active) setAlternativesError(err instanceof Error ? err.message : 'Failed to load alternatives');
       } finally {
-        setAlternativesLoading(false);
+        if (active) setAlternativesLoading(false);
       }
     }
     fetchAlternatives();
+    return () => { active = false; };
   }, [sessionId, redirect.id, pipelineType]);
 
   useEffect(() => {
@@ -118,16 +112,22 @@ export function InlineEditDialog({ redirect, sessionId, onSave, onCancel, pipeli
   const handleNewUrlChange = (newUrl: string) => {
     setEditedRedirect({ ...editedRedirect, newUrl });
     setIsValidating(true);
-    debouncedValidate(newUrl);
+    setSaveError(null);
   };
 
   const handleSave = async () => {
+    if (saveLock.current) return;
     const result = validateUrl(editedRedirect.newUrl);
     if (result.valid) {
+      saveLock.current = true;
       setIsSaving(true);
+      setSaveError(null);
       try {
         await onSave(editedRedirect);
+      } catch (error) {
+        setSaveError(error instanceof Error ? error.message : 'Save not confirmed. Reload results before exporting.');
       } finally {
+        saveLock.current = false;
         setIsSaving(false);
       }
     }
@@ -141,8 +141,10 @@ export function InlineEditDialog({ redirect, sessionId, onSave, onCancel, pipeli
       : 'text-red-500';
 
   return (
-    <Sheet open={true} onOpenChange={onCancel}>
-      <SheetContent side="right" className="sm:max-w-lg">
+    <Sheet open={true} onOpenChange={() => { if (!saveLock.current) onCancel(); }}>
+      <SheetContent side="right" className="w-full sm:max-w-lg"
+        onOpenAutoFocus={() => { returnFocus.current = document.activeElement as HTMLElement; }}
+        onCloseAutoFocus={event => { event.preventDefault(); returnFocus.current?.focus(); }}>
         <SheetHeader>
           <SheetTitle>Edit Redirect</SheetTitle>
           <SheetDescription>
@@ -169,6 +171,9 @@ export function InlineEditDialog({ redirect, sessionId, onSave, onCancel, pipeli
             <div className="relative">
               <Input
                 id="new-url"
+                disabled={isSaving}
+                aria-invalid={!isUrlValid}
+                aria-describedby={urlError ? "target-url-error" : undefined}
                 value={editedRedirect.newUrl}
                 onChange={(e) => handleNewUrlChange(e.target.value)}
                 className={`font-mono text-sm pr-10 ${
@@ -191,7 +196,7 @@ export function InlineEditDialog({ redirect, sessionId, onSave, onCancel, pipeli
               )}
             </div>
             {urlError && !isValidating && (
-              <p className="text-xs text-red-500">{urlError}</p>
+              <p id="target-url-error" className="text-xs text-red-500">{urlError}</p>
             )}
           </div>
 
@@ -215,21 +220,8 @@ export function InlineEditDialog({ redirect, sessionId, onSave, onCancel, pipeli
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">
                 Confidence
               </Label>
-              <Select
-                value={editedRedirect.confidenceBand}
-                onValueChange={(value: 'high' | 'medium' | 'low') =>
-                  setEditedRedirect({ ...editedRedirect, confidenceBand: value })
-                }
-              >
-                <SelectTrigger className="h-9">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="high">High</SelectItem>
-                  <SelectItem value="medium">Medium</SelectItem>
-                  <SelectItem value="low">Low</SelectItem>
-                </SelectContent>
-              </Select>
+              <p className="text-sm capitalize">{redirect.confidenceBand}</p>
+              <p className="text-xs text-muted-foreground">Matcher evidence. Editing a target requires a new approval.</p>
             </div>
           </div>
 
@@ -274,6 +266,7 @@ export function InlineEditDialog({ redirect, sessionId, onSave, onCancel, pipeli
                       transform: alternativesVisible ? 'translateY(0)' : 'translateY(8px)',
                       transition: `opacity 200ms ease-out ${index * 75}ms, transform 200ms ease-out ${index * 75}ms, background-color 150ms`,
                     }}
+                    disabled={isSaving}
                     onClick={() => handleNewUrlChange(alt.url)}
                   >
                     <span className="font-mono text-sm text-foreground break-all">
@@ -294,6 +287,7 @@ export function InlineEditDialog({ redirect, sessionId, onSave, onCancel, pipeli
           </div>
         </div>
 
+        {saveError && <p role="alert" className="px-4 text-sm text-destructive">{saveError}</p>}
         <SheetFooter className="flex-row justify-end gap-2 border-t border-border pt-4">
           <Button variant="outline" onClick={onCancel} disabled={isSaving}>
             Cancel

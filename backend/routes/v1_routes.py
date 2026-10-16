@@ -358,7 +358,11 @@ def export_migration(session_id: str):
         if (r.get("confidence_score") or 0) >= min_confidence
     ]
 
-    content = redirect_export.build_export(rows, fmt, url_format=url_format)
+    try:
+        content = redirect_export.build_export(rows, fmt, url_format=url_format)
+    except redirect_export.UnsupportedExportInput as exc:
+        return _error("unsupported_export_input", str(exc), 422)
+    selection = redirect_export.select_export_mappings(rows, url_format=url_format)
     warning = redirect_export.warning_for(fmt, url_format)
 
     entitlement_service.record_export(user_id, session_id)
@@ -367,7 +371,8 @@ def export_migration(session_id: str):
     response.headers["Content-Disposition"] = (
         f'attachment; filename="{redirect_export.filename_for(fmt)}"'
     )
-    response.headers["X-Redirect-Count"] = str(len(rows))
+    response.headers["X-Redirect-Count"] = str(selection["included_count"])
+    response.headers["X-Redirect-Excluded-Count"] = str(selection["excluded_count"])
     if warning:
         response.headers["X-Redirx-Warning"] = warning
     return response
@@ -668,13 +673,18 @@ def export_watch_fixes(session_id: str):
         return _error("invalid_parameter", "'url_format' must be 'paths' or 'full'.", 400)
 
     rows = service.fix_rows(watch["id"])
-    content = redirect_export.build_export(rows, fmt, url_format=url_format)
+    try:
+        content = redirect_export.build_export(rows, fmt, url_format=url_format)
+    except redirect_export.UnsupportedExportInput as exc:
+        return _error("unsupported_export_input", str(exc), 422)
+    selection = redirect_export.select_export_mappings(rows, url_format=url_format)
 
     response = Response(content, mimetype=redirect_export.content_type_for(fmt))
     response.headers["Content-Disposition"] = (
         f'attachment; filename="fix-{redirect_export.filename_for(fmt)}"'
     )
-    response.headers["X-Redirect-Count"] = str(len(rows))
+    response.headers["X-Redirect-Count"] = str(selection["included_count"])
+    response.headers["X-Redirect-Excluded-Count"] = str(selection["excluded_count"])
     warning = redirect_export.warning_for(fmt, url_format)
     if warning:
         response.headers["X-Redirx-Warning"] = warning

@@ -18,7 +18,7 @@ from .migration_artifact_readers import MigrationArtifactReaders
 from .migration_repository import (InvalidInputError, MigrationNotFoundError,
     MigrationRepository, MigrationRepositoryError, RepositoryUnavailableError,
     _strict_uuid)
-from .redirect_export import build_export, rehost, select_export_mappings
+from .redirect_export import _render_export_selection, rehost, select_export_mappings, UnsupportedExportInput
 
 
 class ArtifactServiceError(MigrationRepositoryError):
@@ -26,8 +26,10 @@ class ArtifactServiceError(MigrationRepositoryError):
 
 
 class PartialArtifactError(ArtifactServiceError):
+    # Keep the established error code/HTTP409 for clients. This class describes
+    # reviewed-selection eligibility, unlike quote-time InventoryIncompleteError.
     code = "inventory_incomplete"
-    next_action = "provide_inventory"
+    next_action = "resolve_matches"
 
 
 class EntitlementRequiredError(ArtifactServiceError):
@@ -37,6 +39,14 @@ class EntitlementRequiredError(ArtifactServiceError):
 
 class DeploymentConflictError(ArtifactServiceError):
     code = "revision_conflict"
+    next_action = "poll"
+
+
+class ArtifactOperationUnconfirmedError(RepositoryUnavailableError):
+    next_action = "poll"
+
+    def __init__(self):
+        super().__init__("Artifact operation could not be confirmed. Read current migration state and reuse the same idempotency key.")
 
 
 _HASH = re.compile(r"^[0-9a-f]{64}$")
@@ -86,17 +96,25 @@ def _safe_row(result: Any) -> dict[str, Any]:
     return dict(data)
 
 
+def _raise_publication_error(error: Any) -> None:
+    # PostgREST normally raises APIError; some adapters return result.error.
+    # Only exact documented SQL exceptions prove a rejected transaction.
+    code = str(getattr(error, "code", "") or "")
+    message = str(getattr(error, "message", "") or "").strip()
+    if code == "P0001":
+        if message == "operation_conflict":
+            raise DeploymentConflictError("The selection or request changed. Read current migration state before trying again.") from None
+        if message == "not_found":
+            raise MigrationNotFoundError("Artifact or migration authority not found.") from None
+        if message == "invalid_input":
+            raise InvalidInputError("The artifact operation input is invalid.") from None
+    raise ArtifactOperationUnconfirmedError() from None
+
+
 def _rpc_row(result: Any) -> dict[str, Any]:
     error = getattr(result, "error", None)
     if error:
-        message = str(getattr(error, "message", "") or "").lower()
-        if "operation_conflict" in message:
-            raise DeploymentConflictError("The idempotency key conflicts with an existing request.")
-        if "not_found" in message:
-            raise MigrationNotFoundError("Artifact or migration record not found.")
-        if "invalid_input" in message:
-            raise InvalidInputError("The artifact operation input is invalid.")
-        raise RepositoryUnavailableError("Artifact operation is temporarily unavailable.")
+        _raise_publication_error(error)
     return _safe_row(result)
 
 
@@ -253,11 +271,16 @@ class MigrationArtifactService:
                                           new_domain=snapshot.get("new_domain"))
         excluded = selected["excluded"]
         if excluded and partial_policy != "allow":
-            raise PartialArtifactError("Unresolved or excluded mappings require an explicit partial-export policy.")
+            raise PartialArtifactError("Review the current matches and exclusions. A partial export requires explicit agreement to exclusions.")
         if not selected["mappings"]:
-            raise PartialArtifactError("The authoritative selection contains no exportable mappings.")
-        content = build_export(rows, fmt, url_format=url_format,
-                               old_domain=snapshot.get("old_domain"), new_domain=snapshot.get("new_domain"))
+            raise PartialArtifactError("No approved, exportable redirects are available. Review the current matches before creating an artifact.")
+        try:
+            content = _render_export_selection(selected, fmt, url_format=url_format)
+        except UnsupportedExportInput as exc:
+            # Serializer messages are fixed safe guidance, not upstream errors.
+            # Nothing is published or charged when this format cannot represent
+            # the reviewed input; callers can choose a lossless data format.
+            raise InvalidInputError(str(exc)) from None
         targets = _origins(snapshot.get("target_origins"))
         redirects: list[dict[str, str]] = []
         for item in selected["mappings"]:
@@ -297,15 +320,18 @@ class MigrationArtifactService:
             # to the legacy paid-export usage ledger. This is the only export
             # completion event on the JEV path, gated on the RPC's own
             # 'replayed' flag so a re-submitted idempotency key never re-fires.
-            capture(AppEvent.REDIRECT_ARTIFACT_EXPORTED, user_id=owner, migration_id=migration, properties={
-                "run_id": run, "artifact_id": summary["id"], "format": fmt,
-                "included_count": summary["included_count"], "excluded_count": summary["excluded_count"],
-            })
+            if not summary.get("replayed"):
+                capture(AppEvent.REDIRECT_ARTIFACT_EXPORTED, user_id=owner, migration_id=migration, properties={
+                    "run_id": run, "artifact_id": summary["id"], "format": fmt,
+                    "included_count": summary["included_count"], "excluded_count": summary["excluded_count"],
+                })
             return summary
+        except RepositoryUnavailableError:
+            raise ArtifactOperationUnconfirmedError() from None
         except MigrationRepositoryError:
             raise
-        except Exception:
-            raise RepositoryUnavailableError("Artifact operation is temporarily unavailable.") from None
+        except Exception as exc:
+            _raise_publication_error(exc)
 
     def authorize_download(self, user_id: UUID | str, migration_id: UUID | str,
                            artifact_id: UUID | str) -> dict[str, Any]:
@@ -325,6 +351,10 @@ class MigrationArtifactService:
             raise RepositoryUnavailableError("Artifact content is temporarily unavailable.")
         content = _safe_row(result)
         if content.get("content_hash") != row.get("content_hash") or not isinstance(content.get("content"), str):
+            raise RepositoryUnavailableError("Artifact content is temporarily unavailable.")
+        # Immutable metadata alone does not prove the retrieved bytes match the
+        # published artifact. Verify the exact UTF-8 payload before releasing it.
+        if hashlib.sha256(content["content"].encode("utf-8")).hexdigest() != row.get("content_hash"):
             raise RepositoryUnavailableError("Artifact content is temporarily unavailable.")
         return {"resource_type": "artifact_download", "artifact_id": str(artifact),
                 "migration_id": str(migration), "content_hash": row.get("content_hash"),
@@ -401,10 +431,12 @@ class MigrationArtifactService:
                     "status": summary["status"],
                 })
             return summary
+        except RepositoryUnavailableError:
+            raise ArtifactOperationUnconfirmedError() from None
         except MigrationRepositoryError:
             raise
-        except Exception:
-            raise RepositoryUnavailableError("Deployment operation is temporarily unavailable.") from None
+        except Exception as exc:
+            _raise_publication_error(exc)
 
     def get_verification_inputs(self, user_id: UUID | str, migration_id: UUID | str,
                                 artifact_id: UUID | str, deployment_id: UUID | str) -> dict[str, Any]:

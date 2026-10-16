@@ -1,9 +1,11 @@
 """Actual PostgREST/HTTPX boundary, no external network or provider spending."""
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 import httpx
 from backend.services.jev_database_transport import jev_worker_database
 from backend.services.jev_store import DurableStore
+from backend.services.jev_pipeline_service import JevService
 
 
 class JevDatabaseTransport(unittest.TestCase):
@@ -42,3 +44,37 @@ class JevDatabaseTransport(unittest.TestCase):
         kwargs=factory.call_args.kwargs
         self.assertFalse(kwargs['http2']);self.assertEqual(kwargs['retries'],0)
         self.assertEqual(kwargs['limits'].max_keepalive_connections,0)
+
+    def test_review_and_progress_reads_recover_each_transport_failure_once(self):
+        calls=[]
+        failed=set()
+        def handler(request):
+            calls.append(request)
+            if request.url.path.endswith('/jev_runs'):
+                return httpx.Response(200,json=[{'pass':2,'seed_revision':3,'provider_requests':8,'seeds':[]}])
+            selection=request.url.params['select']
+            if selection not in failed:
+                failed.add(selection)
+                raise httpx.RemoteProtocolError('fixture reset',request=request)
+            rows=[{'pass':2},{'pass':1}] if selection=='pass' else [
+                {'mapping_id':'mapping-1','pass':2,'seed_revision':2,
+                 'proposal':{'target_url':'https://new.example/Case%2FPath','confidence':.9}}]
+            return httpx.Response(200,json=rows)
+        result=self.execute(handler,lambda store:JevService(SimpleNamespace(client=store.client)).enrich(
+            store.run_id,{'items':[{'mapping_id':'mapping-1'}]}))
+        self.assertEqual(result['jev']['completed_proposals'],1)
+        self.assertEqual(result['items'][0]['jev_proposal']['target_url'],'https://new.example/Case%2FPath')
+        self.assertTrue(result['items'][0]['jev_proposal']['stale'])
+        self.assertEqual([r.method for r in calls],['GET']*5)
+        self.assertTrue(all(r.url.params['run_id']=='eq.00000000-0000-0000-0000-000000000001' for r in calls))
+
+    def test_persistent_progress_failure_never_fabricates_completion(self):
+        calls=[]
+        def handler(request):
+            calls.append(request)
+            if request.url.path.endswith('/jev_runs'):
+                return httpx.Response(200,json=[{'pass':2,'seed_revision':3,'provider_requests':8,'seeds':[]}])
+            raise httpx.ReadTimeout('fixture timeout',request=request)
+        with self.assertRaises(httpx.ReadTimeout):
+            self.execute(handler,lambda store:JevService(SimpleNamespace(client=store.client)).enrich(store.run_id,{}))
+        self.assertEqual([r.method for r in calls],['GET']*3)

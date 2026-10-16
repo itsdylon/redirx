@@ -16,7 +16,7 @@ export function registerArtifactResources(server: McpServer): void {
       throw new McpError(-32602, 'Invalid artifact resource.');
     }
     const { client } = await clientForCall(extra as ToolExtra);
-    const response = await client.pivot('GET', `/migrations/${migration}/artifacts/${artifact}`);
+    const response = await client.pivot('GET', `/migrations/${migration}/artifacts/${artifact}`, undefined, (extra as ToolExtra).signal);
     if (!response.ok || response.data.error || response.data.status !== 'succeeded') {
       throw new McpError(-32002, 'Artifact unavailable for this account.');
     }

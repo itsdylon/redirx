@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
@@ -62,11 +62,12 @@ function renderPage(pivotEnabled = false) {
     },
   });
 
-  render(
+  const view = render(
     <QueryClientProvider client={queryClient}>
       <PricingPage pivotEnabled={pivotEnabled} />
     </QueryClientProvider>,
   );
+  return { ...view, queryClient };
 }
 
 beforeEach(() => {
@@ -127,7 +128,7 @@ describe('PricingPage', () => {
     mockSearchParams.set('source_session_id', 'previous-project');
     renderPage(true);
     expect(await screen.findByText('No confirmed purchase is available for this project.')).toBeInTheDocument();
-    expect(mockGetProjectUnlockStatus).toHaveBeenCalledWith('previous-project');
+    expect(mockGetProjectUnlockStatus).toHaveBeenCalledWith('previous-project', expect.any(AbortSignal));
     expect(mockCreateProjectQuote).not.toHaveBeenCalled();
     expect(mockGetPricingEstimate).not.toHaveBeenCalled();
     expect(mockGetBillingStatus).not.toHaveBeenCalled();
@@ -155,6 +156,33 @@ describe('PricingPage', () => {
     expect(mockNavigate).toHaveBeenCalledWith('/review/previous-project');
     expect(mockCreateProjectQuote).not.toHaveBeenCalled();
     expect(mockCreateProjectCheckout).not.toHaveBeenCalled();
+  });
+
+  it('does not reuse prior-owner purchase status during an account switch', async () => {
+    mockSearchParams.set('source_session_id', 'previous-project');
+    mockGetProjectUnlockStatus.mockResolvedValue({is_unlocked:true,quote_status:'paid',deep_session_id:'owner-a-result'});
+    const view=renderPage(true);
+    await screen.findByRole('button',{name:'Open purchased results'});
+    mockUseAuth.mockReturnValue({user:{id:'owner-b',plan:'free'}});
+    let resolve!:(value:unknown)=>void;
+    mockGetProjectUnlockStatus.mockReturnValue(new Promise(yes=>{resolve=yes;}));
+    view.rerender(<QueryClientProvider client={view.queryClient}><PricingPage pivotEnabled /></QueryClientProvider>);
+    expect(screen.queryByRole('button',{name:'Open purchased results'})).not.toBeInTheDocument();
+    await act(async()=>resolve({is_unlocked:false,quote_status:null}));
+    expect(await screen.findByText('No confirmed purchase is available for this project.')).toBeInTheDocument();
+  });
+
+  it('ignores a checkout completion from a retired owner', async () => {
+    mockSearchParams.set('source_session_id','project-a');
+    mockCreateProjectQuote.mockResolvedValue({id:'quote-a',source_session_id:'project-a',status:'draft',billable_pages:500,line_items:[],subtotal_cents:5000});
+    let resolve!:(value:unknown)=>void;
+    mockCreateProjectCheckout.mockReturnValue(new Promise(yes=>{resolve=yes;}));
+    const view=renderPage();
+    await userEvent.click(await screen.findByRole('button',{name:'Unlock Deep Match'}));
+    mockUseAuth.mockReturnValue({user:{id:'owner-b',plan:'free'}});
+    view.rerender(<QueryClientProvider client={view.queryClient}><PricingPage pivotEnabled={false} /></QueryClientProvider>);
+    await act(async()=>resolve({already_paid:true,deep_session_id:'private-old-result'}));
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 
   it('renders estimator mode without source_session_id', async () => {

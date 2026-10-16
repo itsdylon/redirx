@@ -42,6 +42,12 @@ class _Recorder:
     def eq(self, *_a):
         return self
 
+    def gt(self, *_a):
+        return self
+
+    def is_(self, *_a):
+        return self
+
     def execute(self):
         return SimpleNamespace(data=[])
 
@@ -56,7 +62,7 @@ class TestCompletionStamping(unittest.TestCase):
         recorder = _Recorder()
         with patch("backend.worker.SupabaseClient") as client_cls:
             client_cls.get_client.return_value = recorder
-            run(self.worker.release_lease(self.session_id, status))
+            run(self.worker.release_lease(self.session_id, status, attempt_count=1))
         return recorder.payload
 
     def test_completion_is_stamped(self):

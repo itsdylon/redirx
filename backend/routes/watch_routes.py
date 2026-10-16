@@ -227,13 +227,18 @@ def export_fixes(watch_id: str):
         }), 400
 
     rows = WatchService().fix_rows(watch_id)
-    content = redirect_export.build_export(rows, fmt, url_format=url_format)
+    try:
+        content = redirect_export.build_export(rows, fmt, url_format=url_format)
+    except redirect_export.UnsupportedExportInput as exc:
+        return jsonify({"success": False, "code": "unsupported_export_input", "error": str(exc)}), 422
+    selection = redirect_export.select_export_mappings(rows, url_format=url_format)
 
     response = Response(content, mimetype=redirect_export.content_type_for(fmt))
     response.headers["Content-Disposition"] = (
         f'attachment; filename="fix-{redirect_export.filename_for(fmt)}"'
     )
-    response.headers["X-Redirect-Count"] = str(len(rows))
+    response.headers["X-Redirect-Count"] = str(selection["included_count"])
+    response.headers["X-Redirect-Excluded-Count"] = str(selection["excluded_count"])
     warning = redirect_export.warning_for(fmt, url_format)
     if warning:
         response.headers["X-Redirx-Warning"] = warning

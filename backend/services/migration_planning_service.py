@@ -6,7 +6,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from .analytics_service import AppEvent, capture
-from .inventory_policy import InventoryPolicyError, normalize_origin
+from .inventory_policy import InventoryPolicyError, normalize_origin, _exclusion_original
 from .migration_repository import (
     InvalidInputError, MigrationRepository, RepositoryUnavailableError, _strict_uuid,
 )
@@ -55,6 +55,47 @@ def validate_plan(body):
     return key, result
 
 
+# Persisted policy messages are mapped to finite public codes, never reflected.
+_INPUT_ISSUE_CODES = {
+    'URL origin was not explicitly declared.': 'undeclared_origin',
+    'url must be a valid HTTP(S) URL.': 'invalid_url',
+    'url must not contain credentials.': 'invalid_url',
+    'url has an invalid hostname.': 'invalid_url',
+    'inventory rows must be URL strings or objects.': 'invalid_row',
+    'inventory rows must contain a URL string.': 'invalid_row',
+    'inventory provenance must contain nonblank strings.': 'invalid_provenance',
+    'inventory metadata exceeds bounded JSON limits.': 'invalid_metadata',
+    'inventory metadata must be JSON-safe.': 'invalid_metadata',
+}
+
+
+def _input_issues(row):
+    coverage = row.get('coverage') or {}
+    if not isinstance(coverage, dict) or coverage.get('kind') != 'explicit_import':
+        return None
+    exclusions = row.get('exclusions')
+    available = isinstance(exclusions, list)
+    reported = coverage.get('excluded_count')
+    reported = reported if type(reported) is int and reported >= 0 else None
+    entries = exclusions if available else []
+    counts, examples = {}, []
+    for entry in entries:
+        entry = entry if isinstance(entry, dict) else {}
+        reason = entry.get('reason')
+        code = _INPUT_ISSUE_CODES.get(reason, 'invalid_input') if isinstance(reason, str) else 'invalid_input'
+        counts[code] = counts.get(code, 0) + 1
+        if len(examples) < 10:
+            # Same privacy policy as persisted exclusions; retain exact path
+            # spelling but never queries, fragments, credentials or long hints.
+            hint = _exclusion_original(entry.get('original_url'))
+            examples.append({'code': code, 'url_hint': hint if hint is not None and len(hint) <= 512 else None})
+    total = reported if reported is not None else len(entries) if available else None
+    return {'total_excluded': total, 'diagnostic_count': len(entries),
+            'diagnostics_complete': available and (reported is None or reported == len(entries)),
+            'reason_counts': counts, 'examples': examples,
+            'truncated': len(entries) > len(examples) or total is not None and total > len(examples)}
+
+
 def inventory_summary(row):
     if row is None:
         return None
@@ -62,6 +103,9 @@ def inventory_summary(row):
               ('id', 'side', 'status', 'page_count', 'content_hash', 'policy_version', 'coverage', 'completed_at')}
     if isinstance(result['completed_at'], datetime):
         result['completed_at'] = result['completed_at'].astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+    issues = _input_issues(row)
+    if issues is not None:
+        result['input_issues'] = issues
     return result
 
 
@@ -107,7 +151,7 @@ class MigrationPlanningService:
         ready = all(row and row['status'] == 'complete' for row in inventories.values())
         return envelope(migration['id'], status='succeeded' if ready else 'needs_input',
                         next_action='run_migration' if ready else 'provide_inventory', data={
-            'summary': 'Both explicit inventories are complete.' if ready else 'Provide complete old and new inventories; no network discovery has run.',
+            'summary': 'Both supplied inventories passed syntax and origin checks; full site coverage and reachability are not verified.' if ready else 'Provide complete old and new inventories; no network discovery has run.',
             'old_site': migration['old_origin'], 'new_site': migration['new_origin'],
             'name': migration.get('name'), 'site_aliases': migration.get('site_aliases', {}),
             'inventories': inventories,
@@ -138,7 +182,7 @@ class MigrationPlanningService:
             partial = inventory['status'] != 'complete'
             return envelope(migration_id, operation['id'], status='partial' if partial else 'succeeded',
                             next_action='provide_inventory' if partial else self.get(user_id, migration_id)['next_action'],
-                            data={'summary': 'Explicit inventory imported.', 'inventory': inventory_summary(inventory)})
+                            data={'summary': ('Correct the original URL list using input_issues and import again with a new idempotency key; rejected rows were not silently accepted.' if partial else 'Supplied inventory passed syntax and origin checks; full site coverage and reachability are not verified.'), 'inventory': inventory_summary(inventory)})
         # Other packets own their result schemas; never expose arbitrary DB payloads.
         status = 'queued' if operation['status'] == 'reserved' else operation['status']
         response = envelope(migration_id, operation['id'], status=status,

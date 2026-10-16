@@ -2,7 +2,8 @@
 Email routes: unsubscribe, preference management, nudge cron trigger, and admin test sends.
 """
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, render_template
+from backend.services.email_preferences import OPTIONAL_EMAIL_TYPES, verify_unsubscribe_token, UnsubscribeUnavailable
 import logging
 
 from backend.services.auth_service import require_auth, require_admin
@@ -10,6 +11,14 @@ from backend.services.auth_service import require_auth, require_admin
 logger = logging.getLogger(__name__)
 
 email_blueprint = Blueprint("email", __name__)
+
+
+@email_blueprint.after_request
+def protect_preference_response(response):
+    if request.endpoint == "email.unsubscribe":
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 def _get_email_service():
@@ -22,43 +31,43 @@ def _get_email_service():
 # Public: One-click unsubscribe (linked from email footer)
 # ============================================================================
 
-@email_blueprint.route("/unsubscribe", methods=["GET"])
+def _save_preference(user_id, email_type, opted_out):
+    from redirx.database import SupabaseClient
+    result = SupabaseClient.get_client().table("email_preferences").upsert(
+        {"user_id": user_id, "email_type": email_type, "opted_out": opted_out},
+        on_conflict="user_id,email_type",
+    ).execute()
+    if getattr(result, "error", None) is not None:
+        raise RuntimeError("Email preference write returned an error")
+    rows = getattr(result, "data", None)
+    if not isinstance(rows, list) or not any(
+        isinstance(row, dict) and row.get("user_id") == user_id
+        and row.get("email_type") == email_type and row.get("opted_out") is opted_out
+        for row in rows
+    ):
+        raise RuntimeError("Email preference write was not acknowledged")
+
+
+@email_blueprint.route("/unsubscribe", methods=["GET", "POST"])
 def unsubscribe():
-    """
-    One-click unsubscribe. Unauthenticated — the link contains user_id + type.
-    Returns a simple HTML confirmation page.
-    """
-    user_id = request.args.get("user_id")
-    email_type = request.args.get("type")
-
-    if not user_id or not email_type:
-        return "<html><body><h2>Invalid unsubscribe link.</h2></body></html>", 400
-
+    """GET confirms intent; only a signed, scoped POST changes preferences."""
+    token = request.args.get("token", "")
     try:
-        from redirx.database import SupabaseClient
-        client = SupabaseClient.get_client()
-
-        # Upsert preference to opted_out = true
-        client.table("email_preferences").upsert(
-            {
-                "user_id": user_id,
-                "email_type": email_type,
-                "opted_out": True,
-            },
-            on_conflict="user_id,email_type",
-        ).execute()
-
-        return (
-            "<html><body style='font-family:sans-serif;text-align:center;padding:60px 20px;'>"
-            "<h2>You've been unsubscribed</h2>"
-            f"<p>You will no longer receive <strong>{email_type.replace('_', ' ')}</strong> emails from Redirx.</p>"
-            "<p><a href='/'>Back to Redirx</a></p>"
-            "</body></html>"
-        ), 200
-
+        user_id, email_type = verify_unsubscribe_token(token)
+    except UnsubscribeUnavailable:
+        return render_template("email/unsubscribe.html", state="unavailable"), 503
+    except ValueError:
+        # Previously sent user_id/type links were public mutable identifiers.
+        # Keep a useful recovery path without accepting them as authorization.
+        return render_template("email/unsubscribe.html", state="invalid"), 400
+    if request.method == "GET":
+        return render_template("email/unsubscribe.html", state="confirm", email_type=email_type)
+    try:
+        _save_preference(user_id, email_type, True)
+        return render_template("email/unsubscribe.html", state="saved", email_type=email_type)
     except Exception:
-        logger.exception("Unsubscribe failed")
-        return "<html><body><h2>Something went wrong. Please try again.</h2></body></html>", 500
+        logger.warning("Unsubscribe preference could not be saved")
+        return render_template("email/unsubscribe.html", state="failed"), 503
 
 
 # ============================================================================
@@ -80,6 +89,8 @@ def get_preferences():
             .execute()
         )
 
+        if getattr(result, "error", None) is not None:
+            raise RuntimeError("Email preference read returned an error")
         return jsonify({"preferences": result.data or []})
 
     except Exception:
@@ -94,25 +105,19 @@ def update_preferences():
     Update email preferences.
     Body: { "email_type": "onboard_nudge", "opted_out": true }
     """
-    data = request.get_json()
-    if not data or "email_type" not in data or "opted_out" not in data:
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or "email_type" not in data or "opted_out" not in data:
         return jsonify({"error": "email_type and opted_out are required"}), 400
 
     email_type = data["email_type"]
-    opted_out = bool(data["opted_out"])
+    opted_out = data["opted_out"]
+    if not isinstance(email_type, str) or email_type not in OPTIONAL_EMAIL_TYPES:
+        return jsonify({"error": "Choose a supported optional email type."}), 400
+    if type(opted_out) is not bool:
+        return jsonify({"error": "opted_out must be true or false."}), 400
 
     try:
-        from redirx.database import SupabaseClient
-        client = SupabaseClient.get_client()
-
-        client.table("email_preferences").upsert(
-            {
-                "user_id": request.user.id,
-                "email_type": email_type,
-                "opted_out": opted_out,
-            },
-            on_conflict="user_id,email_type",
-        ).execute()
+        _save_preference(str(request.user.id), email_type, opted_out)
 
         return jsonify({"success": True, "email_type": email_type, "opted_out": opted_out})
 

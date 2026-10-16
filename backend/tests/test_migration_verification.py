@@ -286,7 +286,7 @@ class DatabaseTests(unittest.TestCase):
         f=self.fixture(count)
         if count>500: self.pay(f)
         # This capacity fixture measures verification only, never the engine.
-        with patch('backend.services.migration_run_service.CONTENT_MAX_OLD_URLS',max(5000,count+1)):
+        with patch('backend.services.migration_run_service.PIVOT_CONTENT_MAX_OLD_URLS',max(5000,count+1)):
             run=self.start_run(f)
             job=self.claim_run(); self.runs.authorize_dispatch(job,'worker-test')
         self.runs.finalize_session(job,'worker-test','completed')

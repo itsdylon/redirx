@@ -10,6 +10,8 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 import logging
+import hashlib
+from uuid import UUID, uuid4
 
 import jwt
 import requests
@@ -135,6 +137,7 @@ def create_state_token(user_id: str, return_to: str = '/') -> str:
             'sub': user_id,
             'return_to': return_to,
             'purpose': 'gsc_oauth',
+            'jti': uuid4().hex,
             'iat': now,
             'exp': now + timedelta(seconds=STATE_TTL_SECONDS),
         },
@@ -180,7 +183,45 @@ class GSCService:
 
     # --- OAuth flow ---
 
+    def _consent_rpc(self, name: str, params: Dict[str, Any]):
+        try:
+            return self.connection_db.client.rpc(name, params).execute().data
+        except Exception as exc:
+            if getattr(exc, 'code', None) == 'P0001' and getattr(exc, 'message', None) in {
+                'invalid_input', 'operation_conflict', 'not_found',
+            }:
+                raise GSCError('gsc_invalid_state',
+                    'This Search Console consent is expired, already used, or superseded. Start a new connection.',400) from None
+            raise GSCError('gsc_connection_unconfirmed',
+                'The connection attempt could not be confirmed. Reload connection status before starting fresh consent.',503) from None
+
+    @staticmethod
+    def _check_consent_operation(op, payload, state_hash, status):
+        try:
+            valid = (isinstance(op, dict) and op.get('user_id') == payload['sub']
+                and op.get('action') == 'connect' and op.get('status') == status
+                and op.get('state_hash') == state_hash
+                and op.get('idempotency_key') == 'legacy:' + payload['jti']
+                and op.get('request') == {'protocol': 'legacy_gsc_oauth', 'return_to': payload['return_to']}
+                and type(op.get('epoch')) is int and op['epoch'] >= 1
+                and str(UUID(op['id'])) == op['id'])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            valid = False
+        if not valid:
+            raise GSCError('gsc_connection_unconfirmed',
+                'The connection attempt could not be confirmed. Reload connection status before starting fresh consent.',503)
+        return op
+
     def build_authorization_url(self, user_id: str, return_to: str = '/') -> str:
+        state = create_state_token(user_id, return_to)
+        payload = verify_state_token(state)
+        state_hash = hashlib.sha256(state.encode()).hexdigest()
+        op = self._consent_rpc('reserve_gsc_agent_operation', {
+            'p_user_id': user_id, 'p_action': 'connect', 'p_key': 'legacy:' + payload['jti'],
+            'p_request': {'protocol': 'legacy_gsc_oauth', 'return_to': return_to},
+            'p_state_hash': state_hash,
+        })
+        self._check_consent_operation(op, payload, state_hash, 'awaiting_consent')
         params = {
             'client_id': Config.GOOGLE_OAUTH_CLIENT_ID,
             'redirect_uri': Config.GSC_OAUTH_REDIRECT_URI,
@@ -189,87 +230,117 @@ class GSCService:
             'access_type': 'offline',
             # Force consent so Google always returns a refresh_token.
             'prompt': 'consent',
-            'state': create_state_token(user_id, return_to),
+            'state': state,
         }
         return f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
 
-    def handle_callback(self, code: str, state: str) -> Dict[str, Any]:
-        """
-        Exchange the authorization code and persist the connection.
-
-        Returns the verified state payload (with return_to for the redirect).
-        """
+    def handle_callback(self, code: Optional[str], state: str, error: Optional[str] = None) -> Dict[str, Any]:
+        """Consume historical consent once and publish only at its current epoch."""
+        if not isinstance(state, str) or len(state) > 8192:
+            raise GSCError('gsc_invalid_state','Invalid Search Console consent. Start a new connection.',400)
         payload = verify_state_token(state)
+        # Old stateless links cannot prove current authority; require fresh consent.
+        try:
+            if (not isinstance(payload.get('jti'), str) or len(payload['jti']) != 32
+                    or UUID(payload['jti']).hex != payload['jti']
+                    or str(UUID(payload['sub'])) != payload['sub']
+                    or not isinstance(payload.get('return_to'), str)):
+                raise ValueError()
+        except (ValueError, TypeError, AttributeError):
+            raise GSCError('gsc_invalid_state','This consent link needs to be renewed. Start a new connection.',400) from None
+        state_hash = hashlib.sha256(state.encode()).hexdigest()
+        op = self._consent_rpc('consume_gsc_agent_state', {'p_hash': state_hash})
+        self._check_consent_operation(op, payload, state_hash, 'running')
         user_id = payload['sub']
 
-        response = requests.post(
-            GOOGLE_TOKEN_URL,
-            data={
-                'code': code,
-                'client_id': Config.GOOGLE_OAUTH_CLIENT_ID,
-                'client_secret': Config.GOOGLE_OAUTH_CLIENT_SECRET,
-                'redirect_uri': Config.GSC_OAUTH_REDIRECT_URI,
-                'grant_type': 'authorization_code',
-            },
-            timeout=HTTP_TIMEOUT,
-        )
-        if not response.ok:
-            logger.warning("GSC token exchange failed: %s", response.text[:500])
-            raise GSCError(
-                code='gsc_token_exchange_failed',
-                user_message='Google rejected the connection attempt. Please try again.',
-                status_code=502,
+        def finish(status, tokens=None):
+            result = {'status': status, 'user_id': user_id, 'operation_id': op['id']}
+            receipt = self._consent_rpc('finish_gsc_agent_operation', {
+                'p_user_id': user_id, 'p_id': op['id'], 'p_result': result,
+                # Failed/denied consent preserves credentials; shared state stays connecting.
+                'p_state': 'connected' if tokens is not None else None, 'p_tokens': tokens,
+            })
+            if receipt != result:
+                raise GSCError('gsc_connection_unconfirmed',
+                    'The connection attempt could not be confirmed. Reload connection status before starting fresh consent.',503)
+
+        if error or not isinstance(code, str) or not code or len(code) > 4096:
+            finish('cancelled')
+            return {**payload, 'consent_result': 'cancelled'}
+        try:
+            response = requests.post(
+                GOOGLE_TOKEN_URL,
+                data={'code': code, 'client_id': Config.GOOGLE_OAUTH_CLIENT_ID,
+                    'client_secret': Config.GOOGLE_OAUTH_CLIENT_SECRET,
+                    'redirect_uri': Config.GSC_OAUTH_REDIRECT_URI, 'grant_type': 'authorization_code'},
+                timeout=HTTP_TIMEOUT,
             )
-
-        tokens = response.json()
-        refresh_token = tokens.get('refresh_token')
-        access_token = tokens.get('access_token')
-        if not access_token or not refresh_token:
-            raise GSCError(
-                code='gsc_missing_tokens',
-                user_message=(
-                    'Google did not grant offline access. Please reconnect and '
-                    'approve all requested permissions.'
-                ),
-                status_code=502,
-            )
-
-        google_email = None
-        id_token = tokens.get('id_token')
-        if id_token:
-            try:
-                # Came directly from Google's token endpoint over TLS, so
-                # skipping signature verification here is safe.
-                claims = jwt.decode(id_token, options={"verify_signature": False})
-                google_email = claims.get('email')
-            except Exception:
-                pass
-
-        expires_at = self._expiry_iso(tokens.get('expires_in'))
-        self.connection_db.upsert_connection(
-            user_id=user_id,
-            access_token=access_token,
-            refresh_token=refresh_token,
-            token_expires_at=expires_at,
-            google_email=google_email,
-            scopes=tokens.get('scope') or GSC_SCOPES,
-        )
-        return payload
+            if not response.ok:
+                raise GSCError('gsc_token_exchange_failed',
+                    'Google rejected the connection attempt. Start a new connection.',502)
+            tokens = response.json()
+            if not isinstance(tokens, dict) or any(not isinstance(tokens.get(key), str) or not tokens[key]
+                    for key in ('access_token', 'refresh_token')):
+                raise GSCError('gsc_missing_tokens',
+                    'Google did not grant offline access. Reconnect and approve all requested permissions.',502)
+            # OAuth permits omission only when the granted scope equals the request.
+            # An explicit partial/empty grant must never fall back to requested access.
+            granted_scope = tokens.get('scope', GSC_SCOPES)
+            if (not isinstance(granted_scope, str)
+                    or 'https://www.googleapis.com/auth/webmasters.readonly' not in granted_scope.split()):
+                raise GSCError('gsc_missing_scope',
+                    'Search Console read access was not granted. Reconnect when you want to grant it.',409)
+            google_email = None
+            if tokens.get('id_token'):
+                try:
+                    # Returned directly by the configured Google TLS token endpoint.
+                    google_email = jwt.decode(tokens['id_token'], options={'verify_signature': False}).get('email')
+                except Exception:
+                    pass
+            published_tokens = {'access_token': tokens['access_token'], 'refresh_token': tokens['refresh_token'],
+                'token_expires_at': self._expiry_iso(tokens.get('expires_in')),
+                'google_email': google_email, 'scopes': granted_scope}
+        except (requests.RequestException, ValueError, TypeError, OverflowError, GSCError) as exc:
+            finish('failed')
+            if isinstance(exc, GSCError):
+                raise exc from None
+            raise GSCError('gsc_token_exchange_failed',
+                'Google could not complete this connection. Reload status before starting fresh consent.',502) from None
+        # No retry if publication committed but its acknowledgment was lost.
+        finish('succeeded', published_tokens)
+        return {**payload, 'consent_result': 'connected'}
 
     def disconnect(self, user_id: str) -> None:
-        connection = self.connection_db.get_connection(user_id)
-        if not connection:
+        try:
+            result = self.connection_db.client.rpc('disconnect_legacy_gsc_connection', {
+                'p_user_id': user_id,
+            }).execute()
+            receipt = getattr(result, 'data', None)
+        except Exception:
+            raise GSCError('gsc_disconnect_unconfirmed',
+                'Disconnection could not be confirmed. Reload connection status before trying again.',503) from None
+        if (not isinstance(receipt, dict) or receipt.get('user_id') != str(user_id)
+                or receipt.get('disconnected') is not True
+                or type(receipt.get('epoch')) is not int or receipt['epoch'] < 1
+                or type(receipt.get('deleted_count')) is not int or receipt['deleted_count'] not in (0,1)
+                or (receipt['deleted_count'] == 0 and receipt.get('revocation_token') is not None)
+                or (receipt['deleted_count'] == 1 and (not isinstance(receipt.get('revocation_token'),str)
+                    or not receipt['revocation_token']))):
+            raise GSCError('gsc_disconnect_unconfirmed',
+                'Disconnection could not be confirmed. Reload connection status before trying again.',503)
+        if not receipt['deleted_count']:
             return
         try:
             requests.post(
                 GOOGLE_REVOKE_URL,
-                params={'token': connection['refresh_token']},
+                data={'token': receipt['revocation_token']},
                 timeout=HTTP_TIMEOUT,
             )
         except requests.RequestException:
-            # Best effort — the row deletion is what matters to us.
+            # Local deletion already committed. No later local write can erase
+            # a reconnect while this best-effort provider request was in flight.
+            # Google grant-wide revocation is not atomic with local reconnects.
             pass
-        self.connection_db.delete_connection(user_id)
 
     def get_status(self, user_id: str) -> Dict[str, Any]:
         connection = self.connection_db.get_connection(user_id)
@@ -311,36 +382,57 @@ class GSCService:
         return self._refresh_access_token(user_id, connection['refresh_token'])
 
     def _refresh_access_token(self, user_id: str, refresh_token: str) -> str:
-        response = requests.post(
-            GOOGLE_TOKEN_URL,
-            data={
-                'refresh_token': refresh_token,
-                'client_id': Config.GOOGLE_OAUTH_CLIENT_ID,
-                'client_secret': Config.GOOGLE_OAUTH_CLIENT_SECRET,
-                'grant_type': 'refresh_token',
-            },
-            timeout=HTTP_TIMEOUT,
-        )
-        if not response.ok:
-            logger.warning("GSC token refresh failed for %s: %s", user_id, response.text[:500])
-            # Refresh token revoked/expired — force a clean reconnect.
-            self.connection_db.delete_connection(user_id)
-            raise GSCError(
-                code='gsc_reauth_required',
-                user_message=(
-                    'Your Search Console connection expired. Please reconnect '
-                    'Google Search Console.'
-                ),
-                status_code=409,
+        unavailable = 'Search Console access could not be refreshed. Please try again later.'
+        try:
+            response = requests.post(
+                GOOGLE_TOKEN_URL,
+                data={
+                    'refresh_token': refresh_token,
+                    'client_id': Config.GOOGLE_OAUTH_CLIENT_ID,
+                    'client_secret': Config.GOOGLE_OAUTH_CLIENT_SECRET,
+                    'grant_type': 'refresh_token',
+                },
+                timeout=HTTP_TIMEOUT,
             )
+            tokens = response.json()
+        except (requests.RequestException, ValueError):
+            raise GSCError('gsc_api_error', unavailable, 503) from None
 
-        tokens = response.json()
-        access_token = tokens['access_token']
-        self.connection_db.update_access_token(
-            user_id=user_id,
-            access_token=access_token,
-            token_expires_at=self._expiry_iso(tokens.get('expires_in')),
-        )
+        if not response.ok:
+            # Never delete by owner after an external request: the connection
+            # may have been replaced while Google was answering. A temporary
+            # outage is also not evidence that a refresh token was revoked.
+            if response.status_code == 400 and isinstance(tokens, dict) and tokens.get('error') == 'invalid_grant':
+                raise GSCError(
+                    'gsc_reauth_required',
+                    'Search Console rejected the previous access. Reload connection status; reconnect if access is still unavailable.',
+                    409,
+                )
+            raise GSCError('gsc_api_error', unavailable, 503)
+
+        access_token = tokens.get('access_token') if isinstance(tokens, dict) else None
+        if not isinstance(access_token, str) or not access_token or len(access_token) > 16384:
+            raise GSCError('gsc_api_error', unavailable, 503)
+        try:
+            expires_at = self._expiry_iso(tokens.get('expires_in'))
+        except (ValueError, TypeError, OverflowError):
+            raise GSCError('gsc_api_error', unavailable, 503) from None
+        try:
+            # Reuse applied047, also used by AgentGSCProvider. Secret comparison
+            # stays in the POST body, never a PostgREST URL. This RPC updates only
+            # the connection whose refresh token produced this access token.
+            updated = self.connection_db.client.rpc('refresh_migration_gsc_access_token', {
+                'p_user_id': user_id, 'p_expected_refresh_token': refresh_token,
+                'p_access_token': access_token, 'p_expires_at': expires_at,
+            }).execute()
+        except Exception:
+            # An unconfirmed commit is not permission to issue another refresh
+            # or to destroy credentials. No automatic mutation retry.
+            raise GSCError('gsc_refresh_unconfirmed',
+                'Token refresh could not be confirmed. Reload connection status before retrying.',503) from None
+        if getattr(updated, 'data', None) is not True:
+            raise GSCError('operation_conflict',
+                'Your Search Console connection changed. Reload connection status before retrying.',409)
         return access_token
 
     # --- Search Console API ---

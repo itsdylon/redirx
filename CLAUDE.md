@@ -98,9 +98,11 @@ CI gate (owner decision, October 1, 2026); do not add one during a harness migra
 Use an isolated checkout/environment. Never copy production credentials into tests.
 `python scripts/ci/backend.py` requires disposable loopback PostgreSQL via
 `PREFLIGHT_TEST_DATABASE_URL` and fails on skipped or empty required suites.
-Frontend Vite build is not TypeScript checking. Existing model-specific and capacity
+Frontend Vite build is not TypeScript checking; run `npm run typecheck --prefix frontend` separately. Existing model-specific and capacity
 tests remain available for targeted work; they are not required CI gates.
 
-The legacy `dev.py` uses broad process-killing patterns and fixed ports; avoid it
-across simultaneous worktrees. Account/project settings remain owner-applied.
+The legacy `dev.py` owns isolated POSIX process groups and uses fixed ports. Broad
+process-name killing was deliberately removed: never restore it to clear ports.
+Use separate services/ports for concurrent worktrees. Windows cleanup covers direct
+children; descendant cleanup is not verified. Account/project settings remain owner-applied.
 This guide authorizes no deployment, billing activation or production schema change.

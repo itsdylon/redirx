@@ -2,10 +2,10 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { ThemeProvider } from "next-themes";
 import { PostHogProvider } from "@posthog/react";
-import type { PostHog } from "posthog-js";
+import type { PostHogConfig } from "posthog-js";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { AuthProvider } from "./contexts/AuthContext";
-import { AppWithToaster } from "./App.tsx";
+import { AppWithToaster } from "./App";
 import { OnboardingProvider } from "./contexts/OnboardingContext";
 import { appQueryClient } from "./queries/queryClient";
 import "./styles/globals.css";
@@ -37,14 +37,14 @@ const posthogOptions = {
   // for implicit/email flows, `?code=` for PKCE), and the automatic pageview
   // records the full URL. Scrub them before anything leaves the browser.
   before_send: scrubAuthSecrets,
-  loaded: (client: PostHog) => {
+  loaded: (client) => {
     // Registered on every event, autocapture included. The landing registers
     // source_repo "landing"; without this the app's events were identifiable
     // only by the *absence* of that property, which breaks the moment a third
     // surface starts sending.
     client.register({ source_repo: "app", source_component: "frontend" });
   },
-} as const;
+} satisfies Partial<PostHogConfig>;
 
 createRoot(document.getElementById("root")!).render(
   <PostHogProvider
