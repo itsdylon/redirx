@@ -23,7 +23,11 @@ def _timestamp(value):
         raise ValueError('Invalid history timestamp')
     parsed=datetime.fromisoformat(value.replace('Z','+00:00'))
     if parsed.tzinfo is None:
-        raise ValueError('History timestamp needs timezone')
+        # The live legacy migration_sessions.created_at column is timestamp
+        # without time zone, populated by now() in the UTC database. PostgREST
+        # preserves that shape. Normalize for comparisons; retain raw row text
+        # and cursor precision so existing timezone-aware schemas still work.
+        parsed=parsed.replace(tzinfo=timezone.utc)
     return parsed
 
 
